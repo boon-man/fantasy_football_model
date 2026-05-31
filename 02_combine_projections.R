@@ -6,23 +6,20 @@ library(stringr)
 library(tidyverse)
 library(data.table)
 
-# Defining Variables
-EVAL_YEAR <- 2024
-PRED_YEAR <- 2025
+# Defining Variables, ensuring global variables are read in
+source("00_globals.R")
 positions <- c("rb", "qb", "wr", "te")
 
-# Blended projection: 64% model, 36% FantasyPros
-## Personal bias making the blend ensure that Justin Jefferson is a top 4 receiver
-PRED_WEIGHT <- 0.64 # my model prediction weight
-PROJ_WEIGHT <- 0.36 # fp projection weight
-FANTASYPROS_WEIGHT <- 0.81 # Decreasing FantasyPros projections, they are fairly aggressive relative to model predictions
-
-# Reading in player prediction dataframe
-player_df <- read_csv(paste0("data/model_pred_", as.character(PRED_YEAR), ".csv"))
+## I'm gonna favor my model a bit
+PRED_WEIGHT    <- 0.62   # Weight on my model's prediction
+PROJ_WEIGHT    <- 0.38   # Weight on FantasyPros projection
+PROJ_DAMP        <- 0.95  # Dampening factor for expert projections, they are pretty aggressive
+QB_PENALTY_FACTOR <- 0.85  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
+SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 
 # Scraping FantasyPros projections for each position
-scrape_fp_projections <- function(position) {
-  url <- paste0("https://www.fantasypros.com/nfl/projections/", position, ".php?week=draft&scoring=HALF&week=draft")
+scrape_fp_projections <- function(position, scoring = "HALF") {
+  url <- paste0("https://www.fantasypros.com/nfl/projections/", position, ".php?week=draft&scoring=", scoring, "&week=draft")
   
   page <- read_html(url)
   
@@ -136,30 +133,31 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
     ) +
     theme_minimal(base_size = 13) +
     theme(
-      plot.title = element_text(colour = "#808080", size = 16, face = "bold", hjust = 0.5),
-      axis.title = element_text(colour = "#808080", size = 14),
-      axis.text = element_text(colour = "#808080", size = 12),
-      panel.background = element_rect(fill = "#f7e8d7", color = NA),
-      plot.background = element_rect(fill = "#f7e8d7", color = NA),
+      plot.title = element_text(colour = "#262626", size = 16, face = "bold", hjust = 0.5),
+      axis.title = element_text(colour = "#262626", size = 14),
+      axis.text = element_text(colour = "#262626", size = 12),
+      panel.background = element_rect(fill = "#ECDFCF", color = NA),
+      plot.background = element_rect(fill = "#ECDFCF", color = NA),
       legend.position = "none",
       panel.grid.minor = element_blank(),
       panel.grid.major.x = element_blank(),
-      panel.grid.major.y = element_line(color = "#FFFFFF", linewidth = 0.4),
-      axis.line = element_line(color = "#FFFFFF", size = 0.4) 
+      panel.grid.major.y = element_line(color = "#FFFFFF", linewidth = 0.3),
+      axis.line = element_line(color = "#FFFFFF", linewidth = 0.4) 
     )
 }
 
+# Reading in player prediction dataframe
+player_df <- read_csv(paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
 
 # Pulling in fantasypros predictions
 # Dropping inadvertent string rows from the projections column
 fp_projections <- 
-  bind_rows(lapply(positions, scrape_fp_projections)) %>%
+  bind_rows(lapply(positions, function(pos) scrape_fp_projections(pos, scoring = SCORING_TYPE))) %>%
   mutate(Projected_Points = as.numeric(str_remove(Projected_Points, "[A-Za-z]"))) %>%
   drop_na(Projected_Points)
 
 
 # Apply cleaning to both datasets
-## TODO: make sure the updates to the combined dataset to fix player names in the previous step worked out
 player_df_cleaned <-
   player_df %>%
   mutate(Player_clean = clean_player_name(Player))
@@ -172,29 +170,79 @@ fp_cleaned <-
 combined_projections <- 
   player_df_cleaned %>%
   full_join(fp_cleaned, by = c("Player_clean", "Pos")) %>%
-  select(Player = Player.x, Pos, Predicted, FantasyPros_Player = Player.y, Projected_Points)
+  select(Player = Player.x, Pos, Predicted, FantasyPros_Player = Player.y, Projected_Points) %>%
+  mutate(PosGroup = if_else(Pos == "QB", "QB", "SKILL")) # Grouping QBs separately from skill positions for blending
 
-# Blending the combined projections into a final blended_projection step
-combine_projections <- 
-  combined_projections %>% # Marvin Harrison's prediction is warped due to sharing a name with his father, 
-  mutate(Predicted = if_else(Player == "Marvin Harrison", NA_real_, Predicted)) %>%
+# Adjusting model predictions for players that are expected to miss games during the upcoming season
+combined_projections <- combined_projections %>%
   mutate(
-    # Ensure numeric columns
-    Predicted = as.numeric(Predicted),
-    Projected_Points = as.numeric(Projected_Points),
-    
-    # Creating a final blended projection using weights and FantasyPros adjustment
+    Predicted = case_when(
+      Player == "Alexander Mattison" ~ Predicted * 0.5, # Banished to bench warming
+      Player == "Antonio Gibson" ~ Predicted * 0.5, # Banished to bench warming
+      Player == "Austin Ekeler" ~ Predicted * 0.8, # Banished to bench warming
+      Player == "Brandon Aiyuk" ~ Predicted * 0.6, # Injury
+      Player == "Brian Robinson" ~ Predicted * 0.85, # Team hates him?
+      Player == "Bucky Irving" ~ Predicted * 1.25, # Now a starter
+      Player == "Cam Akers" ~ Predicted * 0.25, # Banished to bench warming
+      Player == "Chase Brown" ~ Predicted * 1.2, # Now a starter
+      Player == "Chris Godwin" ~ Predicted * 0.75, # Recovering from injury
+      Player == "Christian Watson" ~ Predicted * 0.40, # Torn ACL
+      Player == "Clyde Edwardshelaire" ~ Predicted * 0.33, # PTSD?
+      Player == "Cole Kmet" ~ Predicted * 0.8, # Now a backup
+      Player == "Cordarrelle Patterson" ~ Predicted * 0.33, # Cut, washed
+      Player == "Darnell Mooney" ~ Predicted * 0.85, # Injury
+      Player == "Dameon Pierce" ~ Predicted * 0.50, # Banished to bench warming
+      Player == "Deandre Hopkins" ~ Predicted * 0.75, # Washed, now a slot receiver
+      Player == "Emmanuel Wilson" ~ Predicted * 0.5, # Banished to bench warming
+      Player == "Jakobi Meyers" ~ Predicted * 0.9, # Hates his team
+      Player == "Jayden Reed" ~ Predicted * 0.75, # Injury
+      Player == "Jaylen Warren" ~ Predicted * 1.25, # Now a projected starter
+      Player == "Joe Mixon" ~ Predicted * 0.6,       # Broken foot
+      Player == "Jonnu Smith" ~ Predicted * 0.8, # Aaron Rodgers
+      Player == "Jordan Addison" ~ Predicted * 0.85, # DUI
+      Player == "Jordan Mason" ~ Predicted * 1.25, # Splitting starting duties
+      Player == "Keenan Allen" ~ Predicted * 0.8, # No longer a starter
+      Player == "Michael Carter" ~ Predicted * 0.25, # Banished to bench warming
+      Player == "Michael Pittman" ~ Predicted * 0.85, # Anthony Richardson
+      Player == "Mike Williams" ~ Predicted * 0.00,    # Retiring
+      Player == "Najee Harris" ~ Predicted * 0.7,     # Blew his damn eyes off
+      Player == "Nick Chubb" ~ Predicted * 0.9,       # Broken foot
+      Player == "Pierre Strong" ~ Predicted * 0.25, # Banished to bench warming
+      Player == "Rachaad White" ~ Predicted * 0.8, # Now a backup
+      Player == "Rashee Rice" ~ Predicted * 0.62,     # DUI
+      Player == "Ricky Pearsall" ~ Predicted * 1.35, # Was shot, only WR left on team
+      Player == "Russell Wilson" ~ Predicted * 0.8, # Model needs to chill out with Russ a bit
+      Player == "Sam Darnold" ~ Predicted * 0.85, # Model needs to chill out with Darnold a bit
+      Player == "Stefon Diggs" ~ Predicted * 0.9,     # Torn ACL
+      Player == "Tank Dell" ~ Predicted * 0.10,        # Torn ACL
+      Player == "Tyrone Tracy" ~ Predicted * 1.2, # Now a starter
+      Player == "Xavier Worthy" ~ Predicted * 1.35,    # Teammate has DUI
+      TRUE ~ Predicted
+    )
+  )
+
+
+## Blending the combined projections into a final blended_projection step
+blended_df <- 
+  combined_projections %>%
+  mutate(
     final_projection = case_when(
       !is.na(Predicted) & !is.na(Projected_Points) ~
-        PRED_WEIGHT * Predicted + PROJ_WEIGHT * (FANTASYPROS_WEIGHT * Projected_Points),
+        PRED_WEIGHT * Predicted +
+        (PROJ_WEIGHT * Projected_Points * PROJ_DAMP),
+      
       !is.na(Predicted) ~ Predicted,
-      !is.na(Projected_Points) ~ FANTASYPROS_WEIGHT * Projected_Points,
+      
+      is.na(Predicted) & !is.na(Projected_Points) ~
+        PROJ_DAMP * Projected_Points *
+        if_else(PosGroup == "QB", QB_PENALTY_FACTOR, SKILL_PENALTY_FACTOR),
+      
       TRUE ~ NA_real_
     )
   )
 
 final_df <- 
-  combine_projections %>%
+  blended_df %>%
   mutate(Player = coalesce(Player, FantasyPros_Player)) %>%
   select(Player, Pos, 
          Model_Prediction = Predicted,
@@ -210,4 +258,4 @@ plot_predicted_trajectories(combined, final_df, pos_group = "RB", sample_n = 8)
 plot_predicted_trajectories(combined, final_df, pos_group = "WR", sample_n = 8)
 plot_predicted_trajectories(combined, final_df, pos_group = "TE", sample_n = 8)
 
-fwrite(final_df, paste0("data/blended_proj_", as.character(PRED_YEAR), ".csv"))
+fwrite(final_df, paste0("data/blended_proj_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))

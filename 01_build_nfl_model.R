@@ -1,19 +1,4 @@
-required_packages <- c(
-  "rvest", "dplyr", "stringr", "forecast", "tidyr", "tidyverse",
-  "zoo", "ggplot2", "lubridate", "data.table", "rBayesianOptimization",
-  "caret", "xgboost", "ggrepel"
-)
 
-install_if_missing <- function(pkg) {
-  if (!require(pkg, character.only = TRUE)) {
-    install.packages(pkg, dependencies = TRUE)  # Install if not found
-    library(pkg, character.only = TRUE)         # Load after installing
-  } else {
-    library(pkg, character.only = TRUE)         # Load if already installed
-  }
-}
-
-invisible(lapply(required_packages, install_if_missing))
 
 # === IMPORTANT === #
 # This script is not designed to let it rip all in one go,
@@ -22,11 +7,8 @@ invisible(lapply(required_packages, install_if_missing))
 # PLEASE DO NOT JUST HIT RUN ALL
 
 # === GLOBAL CONFIGURATION === #
+source("00_globals.R") # Running global variable config script
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE to skip data loading and use pre-saved data
-EVAL_YEAR <- 2024                   # Year being forecasted
-PRED_YEAR <- EVAL_YEAR + 1          # Year to predict
-START_YEAR <- 2006                 # Earliest year to pull data. NOTE: Passing statistics were updated beginning in 2006, prior seasons are missing some efficiency stats
-PPR_MULT <- 0.5                    # PPR multiplier for receptions
 
 # Function to scrape data from Pro Football Reference
 scrapeData = function(urlprefix, urlend, startyr, endyr, stat) {
@@ -95,6 +77,7 @@ clean_player_name <- function(name) {
     str_to_title()
 }
 
+# Function to train the XGBoost model for a specific position
 train_position_model <- function(df, position, feature_cols) {
   library(dplyr)
   library(xgboost)
@@ -132,7 +115,7 @@ train_position_model <- function(df, position, feature_cols) {
   
   # Define Bayesian optimization function
   xgb_cv_bayes <- function(nrounds, max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree) {
-    set.seed(62820)
+    set.seed(82525)
     
     nrounds <- as.integer(round(nrounds))
     max_depth <- as.integer(round(max_depth))
@@ -186,25 +169,29 @@ train_position_model <- function(df, position, feature_cols) {
   opt_result <- BayesianOptimization(
     FUN = xgb_cv_bayes,
     bounds = list(
-      nrounds = c(150, 400),
-      max_depth = c(8, 12),
-      eta = c(0.1, 0.35),
+      nrounds = c(150, 750),
+      max_depth = c(3, 7),
+      eta = c(0.1, 0.3),
       gamma = c(0, 0.1),
-      min_child_weight = c(0.1, 0.5),
-      subsample = c(0.8, 1.0),
+      min_child_weight = c(0.05, 0.5),
+      subsample = c(0.9, 1.0),
       colsample_bytree = c(0.7, 1.0)  
     ),
-    init_points = 10,
+    init_points = 20,
     n_iter = 30,
     acq = "ucb",          # Or ei depending on strategy
-    kappa = 2.1,
-    eps = 0.01,
+    kappa = 1.75,
+    eps = 0.4,
     verbose = TRUE
   )
   
   # Train final model with best parameters
   best_params <- opt_result$Best_Par
-  final_model <- xgboost(
+  
+  dvalid <- xgb.DMatrix(data = data.matrix(X_test), label = y_test)
+  watchlist <- list(train = dtrain, eval = dvalid)
+  
+  final_model <- xgb.train(
     data = dtrain,
     nrounds = round(best_params[["nrounds"]]),
     max_depth = round(best_params[["max_depth"]]),
@@ -215,6 +202,8 @@ train_position_model <- function(df, position, feature_cols) {
     colsample_bytree = best_params[["colsample_bytree"]],
     objective = "reg:squarederror",
     eval_metric = "mae",
+    early_stopping_rounds = 25,
+    watchlist = watchlist,
     verbose = 0
   )
   
@@ -291,7 +280,7 @@ plot_prediction_error_distribution <- function(pred_df) {
       color = "white",
       alpha = 0.8
     ) +
-    geom_density(color = "#FFC461", size = 0.7, alpha = 0.9) +  # Add smoothed density line
+    geom_density(color = "#FFC461", linewidth = 0.7, alpha = 0.9) +  # Add smoothed density line
     labs(
       title = "Distribution of Prediction Errors",
       x = "Prediction Error (Predicted - Actual)",
@@ -406,16 +395,16 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
     ) +
     theme_minimal(base_size = 13) +
     theme(
-      plot.title = element_text(colour = "#808080", size = 16, face = "bold", hjust = 0.5),
-      axis.title = element_text(colour = "#808080", size = 14),
-      axis.text = element_text(colour = "#808080", size = 12),
-      panel.background = element_rect(fill = "#f7e8d7", color = NA),
-      plot.background = element_rect(fill = "#f7e8d7", color = NA),
+      plot.title = element_text(colour = "#262626", size = 16, face = "bold", hjust = 0.5),
+      axis.title = element_text(colour = "#262626", size = 14),
+      axis.text = element_text(colour = "#262626", size = 12),
+      panel.background = element_rect(fill = "#ECDFCF", color = NA),
+      plot.background = element_rect(fill = "#ECDFCF", color = NA),
       legend.position = "none",
       panel.grid.minor = element_blank(),
       panel.grid.major.x = element_blank(),
-      panel.grid.major.y = element_line(color = "#FFFFFF", linewidth = 0.4),
-      axis.line = element_line(color = "#FFFFFF", size = 0.4) 
+      panel.grid.major.y = element_line(color = "#FFFFFF", linewidth = 0.3),
+      axis.line = element_line(color = "#FFFFFF", linewidth = 0.4) 
     )
 }
 
@@ -558,14 +547,26 @@ combined <-
   mutate(Pos = last(Pos)) %>% # Each player's most recent position will be used for their historical performance eval
   ungroup() %>%
   mutate(Year = as.Date(as.yearmon(Year))) %>%
-  filter(Pos %in% c('WR', 'TE', 'RB', 'QB')) %>%
-  mutate(Player = clean_player_name(Player)) # Cleaning Player Names
+  filter(Pos %in% c('WR', 'TE', 'RB', 'QB'))
+#  mutate(Player = clean_player_name(Player)) # Cleaning Player Names
 
 # Removing duplicate player rows again after creating combined dataset
 # There are wonky circumstances where Christian McCaffery completed a pass with one team during a season but not another that he was traded to, distorting a join
 combined <- 
   clean_traded_players(combined) %>%
   select(-contains("has_combined"))
+
+# Removes records of a Mike Williams that played in the mid-2000s. They hardly played and distort the rest of Mike Williams data
+combined <- combined %>%
+  filter(!(Player == "Mike Williams" & Year < as.Date("2010-01-01")))
+
+# Distinguishing Marvin Harrison Jr from Marvin Harrison Sr in the dataset
+# combined <-
+#   combined %>%
+#   mutate(Player = if_else(Player == "Marvin Harrison" & year(Year) >= 2024,
+#                  "Marvin Harrison Jr",
+#                  Player))
+
 
 # Creating the awards dataframe
 awards_df <- expand_awards(combined)
@@ -586,6 +587,25 @@ combined <-
   group_by(Player) %>%
   arrange(Year) %>%
   mutate(
+    year_num = year(Year),
+    # Identifying a player's rookie year
+    rookie_year = min(year_num),
+    # Data prior to 2006 is not available, this will make the model incorrectly assume a player like Peyton Manning was a 30 year old rookie
+    missing_pre_2006 = if_else(rookie_year <= 2006 & Age > 23, 1, 0),
+    # Estimating the rookie year for players that played prior to 2006
+    estimated_rookie_year = if_else(
+      missing_pre_2006 == 1,
+      year_num - (Age - 22),  # Assume they were ~22 in their real rookie year
+      rookie_year
+    ),
+    # How many years of a player's career are missing from the data?
+    num_missing_years = 
+      if_else(
+        missing_pre_2006 == 1,
+        2006 - estimated_rookie_year,
+        0
+    ),
+    
     # Adding an age squared feature, to capture the potential non-linear relationship between age and performance
     age_sq = Age^2,
     
@@ -607,12 +627,16 @@ combined <-
     # Creating a targets + games played feature, to show overall player involvement
     adjusted_targets = (Tgt * G),
     targets_per_game = (Tgt / G),
+    touches = rush_att + Rec,
+    points_per_target = (points / replace_na(Tgt, 1)),
+    points_per_touch = (points / replace_na(touches, 1)),
     
     # Cumulative stats up to (but not including) current season
     career_games = cumsum(replace_na(G, 0)) - replace_na(G, 0),
     career_games_started = cumsum(replace_na(GS, 0)) - replace_na(GS, 0),
     career_adjusted_productivity = cumsum(replace_na(adjusted_productivity, 0)) - replace_na(adjusted_productivity, 0),
     
+    career_touches = cumsum(replace_na(touches, 0)) - replace_na(touches, 0),
     career_rushing_yds = cumsum(replace_na(rush_yds, 0)) - replace_na(rush_yds, 0),
     career_receiving_yds = cumsum(replace_na(receiving_yds, 0)) - replace_na(receiving_yds, 0),
     career_passing_yards = cumsum(replace_na(passing_yards, 0)) - replace_na(passing_yards, 0),
@@ -634,15 +658,6 @@ combined <-
     avg_receiving_td_3yr = rollapplyr(receiving_td, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     avg_passing_td_3yr = rollapplyr(passing_td, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     
-    # Adding a rolling avg for rushing/receiving efficiency stats
-    rush_success_pct_3yr = rollapplyr(rush_success_pct, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    receiving_success_pct_3yr = rollapplyr(receiving_success_pct, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    receiving_yards_target_3yr = rollapplyr(receiving_yards_target, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    Tgt_3yr = rollapplyr(Tgt, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    catch_percent_3yr = rollapplyr(catch_percent, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    adjusted_targets_3yr = rollapplyr(adjusted_targets, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    targets_per_game_3yr = rollapplyr(targets_per_game, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
-    
     # Adding metrics for QB efficiency stats 
     rate_per_attempt = Rate / passing_att,
     td_int_ratio = if_else(passing_int > 0, passing_td / passing_int, NA_real_),
@@ -658,13 +673,22 @@ combined <-
     explosive_yards_proxy = rush_yds - (rush_success_pct * rush_att * 4),
     adj_ypa = rush_yds_att * (1 + rush_success_pct),
     fbl_per_att = rush_fbl / rush_att,
-    touches = rush_att + Rec,
     yards_from_scrimmage = rush_yds + receiving_yds,
     yards_from_scrimmage_3yr = rollapplyr(yards_from_scrimmage, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     
     # Receiving efficiency metrics
     explosive_catch_rate = if_else(Rec > 0, receiving_1D / Rec, 0),
     explosive_receiving_eff = if_else(receiving_yds > 100, catch_percent * receiving_yards_target, 0),
+    
+    # Adding a rolling avg for rushing/receiving efficiency stats
+    rush_success_pct_3yr = rollapplyr(rush_success_pct, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    touches_3yr = rollapplyr(touches, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    receiving_success_pct_3yr = rollapplyr(receiving_success_pct, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    receiving_yards_target_3yr = rollapplyr(receiving_yards_target, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    Tgt_3yr = rollapplyr(Tgt, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    catch_percent_3yr = rollapplyr(catch_percent, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    adjusted_targets_3yr = rollapplyr(adjusted_targets, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    targets_per_game_3yr = rollapplyr(targets_per_game, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     
     # General career info
     career_total_points = cumsum(replace_na(points, 0)) - replace_na(points, 0),
@@ -706,16 +730,39 @@ combined <-
   # Defining the target variable
   mutate(points_next_year = lead(points, 1)) %>%
   ungroup() %>%
+  group_by(Year, Pos) %>%
+  mutate(pos_rank = dense_rank(desc(points)), # current year rank
+         top_finish_flag = case_when(
+           Pos == "QB" & pos_rank <= 12 ~ 1,
+           Pos == "RB" & pos_rank <= 24 ~ 1,
+           Pos == "WR" & pos_rank <= 36 ~ 1,
+           Pos == "TE" & pos_rank <= 12 ~ 1,
+           TRUE ~ 0
+         )) %>%  
+  ungroup() %>%
+  group_by(Player) %>%
+  arrange(Year) %>%
+  mutate(pos_rank_last_year = lag(pos_rank, 1), # prior year rank
+         career_top_finish_count = cumsum(top_finish_flag)) %>%  
+  ungroup() %>%
   # Only apply infinity and NA fixes to numeric columns
   mutate(across(where(is.numeric), ~ ifelse(is.infinite(.), NA, .))) %>% 
   mutate(across(where(is.numeric), ~ replace_na(., 0)))
+
+## TODO: Remove columns with high correlation?
+#check <- combined %>% 
+#  select(Player, Year, Pos, Age, G, receiving_yds, rush_yds, passing_yards, seasons_played, career_total_points, rookie_year, missing_pre_2006, pos_rank, pos_rank_last_year)
 
 # Filtering for players with extremely few points in the next year, these players would not be drafted regardless
 # Removing the EVAL_YEAR data from the training set, as it is the evaluation year
 model_df <- 
   combined %>%
   filter(!is.na(points_next_year), G > 0) %>%
-  filter(points_next_year > 20) %>%
+  filter(
+    (Pos == "QB" & points_next_year > 40) |
+      (Pos %in% c("RB", "WR") & points_next_year > 25) |
+      (Pos == "TE" & points_next_year > 15)
+  ) %>%
   filter(Year < as.Date(paste0(EVAL_YEAR, "-01-01")))
 
 # Creating the prediction dataframes for the evaluation year
@@ -738,21 +785,24 @@ qb_features <- c(
   "avg_points_per_game_3yr", "avg_qbr_3yr", "avg_rushing_yds_3yr", 
   "career_adjusted_productivity", "career_games",
   "career_games_started", "career_passing_td", "career_passing_yards", "career_rushing_td",
-  "career_rushing_yds", "career_star_score", "career_total_points", 
-  "consecutive_decline", "GWD", "games_last_year",
-  "injured_last_year", "most_recent_star_score", "num_teams_prior",
+  "career_rushing_yds", "career_star_score", "career_top_finish_count", "career_total_points", 
+  "consecutive_decline", "estimated_rookie_year", "GWD", "games_last_year",
+  "injured_last_year", "missing_pre_2006",
+  "most_recent_star_score", "num_missing_years", "num_teams_prior",
   "qb_yards", "qb_yards_3yr", "passing_1D", "passing_adj_net_yards_att",
   "passing_adj_net_yards_att_3yr", "passing_att", "passing_avg_yards_att", "passing_comebacks",
   "passing_comp", "passing_comp_pct", "passing_int", "passing_int_pct", "passing_long",
   "passing_net_yards_att", "passing_sack", "passing_success_pct", "passing_success_pct_3yr",
   "passing_td", "passing_td_pct", "passing_yards", "passing_yards_att", "passing_yards_att_3yr", 
   "passing_yards_comp", "passing_yards_game", "points", "points_delta", "points_last_year", 
-  "points_pct_change", "points_vs_3yr_avg", "prior_injury_flag",
+  "points_pct_change", "points_vs_3yr_avg",
+  "pos_rank", "pos_rank_last_year", "prior_injury_flag",
   "rate_per_attempt", "rush_1D", "rush_att", "rush_attempts_per_game",
   "rush_efficiency", "rush_fbl", "rush_long", "rush_success_pct", "rush_success_pct_3yr", 
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game", 
   "sack_percent", "sack_yds", "seasons_played", 
-  "star_score", "Team", "td_int_ratio", "wins", "years_since_peak"
+  "star_score", "Team", "td_int_ratio", "top_finish_flag",
+  "wins", "years_since_peak"
 )
 
 rb_features <- c(
@@ -765,18 +815,21 @@ rb_features <- c(
   "avg_rushing_yds_3yr", "career_adjusted_productivity",
   "career_games", "career_games_started", "career_receiving_td",
   "career_receiving_yds", "career_rushing_td", "career_rushing_yds", "career_star_score",
-  "career_total_points", "consecutive_decline",
+  "career_top_finish_count", "career_total_points", "career_touches",
+  "consecutive_decline", "estimated_rookie_year",
   "explosive_catch_rate", "explosive_receiving_eff", "explosive_yards_proxy",
-  "fbl_per_att", "games_last_year", "injured_last_year",
-  "most_recent_star_score", "num_teams_prior", "points", "points_delta", "points_last_year",
-  "points_pct_change", "points_vs_3yr_avg", "prior_injury_flag", "receiving_1D",
+  "fbl_per_att", "games_last_year", "injured_last_year", "missing_pre_2006",
+  "most_recent_star_score", "num_teams_prior", "num_missing_years",
+  "points", "points_delta", "points_last_year", "points_per_target", "points_per_touch",
+  "points_pct_change", "points_vs_3yr_avg", "pos_rank", "pos_rank_last_year",
+  "prior_injury_flag", "receiving_1D",
   "receiving_long", "receiving_rec_g", "receiving_success_pct",
   "receiving_success_pct_3yr", "receiving_td", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_target", "receiving_yards_target_3yr", "rush_1D",
   "rush_att", "rush_attempts_per_game", "rush_efficiency", "rush_fbl", "rush_long", "rush_success_pct",
   "rush_success_pct_3yr", "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "star_score", "targets_per_game", "targets_per_game_3yr",
-  "Team", "touches", "touches_last_year", 
+  "Team", "top_finish_flag", "touches", "touches_last_year", "touches_3yr",
   "yards_from_scrimmage", "yards_from_scrimmage_3yr", "years_since_peak"
 )
 
@@ -788,22 +841,24 @@ wr_features <- c(
   "avg_receiving_td_3yr", "avg_receiving_yds_3yr", "avg_rushing_td_3yr",
   "avg_rushing_yds_3yr", "career_adjusted_productivity", 
   "career_games", "career_games_started", "career_receiving_td",
-  "career_receiving_yds", "career_rushing_yds", "career_star_score",
+  "career_receiving_yds", "career_rushing_yds", "career_star_score", "career_top_finish_count",
   "career_total_points", "catch_percent", "catch_percent_3yr", "consecutive_decline",
+  "estimated_rookie_year",
   "explosive_catch_rate", "explosive_receiving_eff", "explosive_yards_proxy",
   "games_last_year", "injured_last_year", "log_career_star_score", "log_career_total_points",
-  "most_recent_star_score", "num_teams_prior", "points", "points_delta", "points_last_year",
-  "points_pct_change", "points_vs_3yr_avg", "prior_injury_flag", "receiving_1D",
+  "missing_pre_2006", "most_recent_star_score", "num_teams_prior", "num_missing_years",
+  "points", "points_delta", "points_last_year", "points_per_target",
+  "points_pct_change", "points_vs_3yr_avg", "prior_injury_flag", 
+  "pos_rank", "pos_rank_last_year", "receiving_1D",
   "receiving_long", "receiving_rec_g", "receiving_success_pct",
   "receiving_success_pct_3yr", "receiving_td", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_target", "receiving_yards_target_3yr",
   "rush_att", "rush_fbl", "rush_long", "rush_success_pct",
   "rush_success_pct_3yr", "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "star_score", "targets_per_game", "targets_per_game_3yr",
-  "Team", "touches", "yards_from_scrimmage", "yards_from_scrimmage_3yr", "years_since_peak"
+  "Team", "top_finish_flag", "touches", "yards_from_scrimmage", 
+  "yards_from_scrimmage_3yr", "years_since_peak"
 )
-
-## TODO: update model training pipeline so that there are 40 rounds
 
 # Creating models and making predictions for each major positional group
 qb_model <- train_position_model(model_df, "QB", qb_features)
@@ -824,6 +879,7 @@ plot_feature_importance(wr_model$model, wr_model$features, top_n = 20) +
 wr_model_preds <- wr_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
+# Evaluating model performance
 print(qb_model$rmse)
 print(qb_model$mae)
 
@@ -863,6 +919,7 @@ plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", sample_n = 8)
 # Saving out final combined dataframe
 final <-
   bind_rows(qb_preds, wr_preds, rb_preds) %>%
+  mutate(Player = clean_player_name(Player)) %>% # Cleaning Player Names
   select(Player, Pos, Predicted)
 
-fwrite(final, paste0("data/model_pred_", as.character(PRED_YEAR), ".csv"))
+fwrite(final, paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
