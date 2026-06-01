@@ -8,6 +8,8 @@
 
 # === GLOBAL CONFIGURATION === #
 source("00_globals.R") # Running global variable config script
+## TODO: Flesh out the functions.R file and move all functions there, then source it here to keep this script cleaner
+## TODO: Create a function that appends new csvs onto master dataframes, future runs will require manual data scraping
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE to skip data loading and use pre-saved data
 
 # Function to scrape data from Pro Football Reference
