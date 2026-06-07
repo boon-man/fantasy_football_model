@@ -1,5 +1,3 @@
-
-
 # === IMPORTANT === #
 # This script is not designed to let it rip all in one go,
 # It is intended to be processed or evaluated in steps to ensure that data is being compiled appropriately
@@ -9,15 +7,34 @@
 # === GLOBAL CONFIGURATION === #
 source("00_globals.R")  # Running global variable config script
 source("functions.R")   # Loading shared cleaning and nflverse data intake functions
-## TODO: Move the remaining modeling and plotting functions into functions.R as well
-SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
+source("evaluate_model.R")  # Loading the model performance diagnostic plots
+
+
+SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
+SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
+
+# TODO: Add in simluated prediction ranges, identify high-ceiling players
+# TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
+# TODO: Fix Career trajectories plot to look better 
+# TODO: Add in additional features to improve model performance
+
 
 # Function to train the XGBoost model for a specific position
-train_position_model <- function(df, position, feature_cols) {
+#
+# Tuning budget parameters, lower these for fast code-testing runs:
+#   init_points : random configurations evaluated before the Bayesian search starts
+#   n_iter      : Bayesian optimization iterations after initialization
+#   max_nrounds : tree count ceiling for CV and the final fit, early stopping decides the actual count
+train_position_model <- function(df, position, feature_cols,
+                                 skip_tuning = SKIP_TUNING,
+                                 init_points = 10,
+                                 n_iter = 20,
+                                 max_nrounds = 1000) {
   library(dplyr)
   library(xgboost)
   library(rBayesianOptimization)
   library(caret)
+  library(ranger)
 
   # Filter to relevant position
   pos_df <- df %>%
@@ -48,87 +65,122 @@ train_position_model <- function(df, position, feature_cols) {
 
   dtrain <- xgb.DMatrix(data = data.matrix(X_train), label = y_train)
 
-  # Define Bayesian optimization function
-  xgb_cv_bayes <- function(nrounds, max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree) {
-    set.seed(82525)
+  # === BASELINE MODEL === #
+  # An untuned random forest on the same split, the benchmark the tuned model must beat
+  # Random forests cannot handle missing values, so the matrices are zero filled
+  # to match the pipeline convention before training
+  baseline_train <- as.data.frame(data.matrix(X_train))
+  baseline_test <- as.data.frame(data.matrix(X_test))
+  baseline_train[is.na(baseline_train)] <- 0
+  baseline_test[is.na(baseline_test)] <- 0
 
-    nrounds <- as.integer(round(nrounds))
-    max_depth <- as.integer(round(max_depth))
+  set.seed(62820)
+  baseline_model <- ranger(x = baseline_train, y = y_train, num.trees = 500)
 
-    # Validate parameters
-    if (anyNA(c(nrounds, max_depth, eta, gamma, min_child_weight, subsample))) {
-      return(list(Score = -1e5, Pred = 0))
+  # Scoring the baseline on the holdout split
+  baseline_preds <- predict(baseline_model, data = baseline_test)$predictions
+  baseline_rmse <- sqrt(mean((baseline_preds - y_test)^2))
+  baseline_mae <- mean(abs(baseline_preds - y_test))
+  cat("Baseline RF holdout RMSE for", position, "model:", round(baseline_rmse, 3), "\n")
+
+  # === TUNED MODEL === #
+  # Tuned hyperparameters are cached per position so reruns can skip the optimization,
+  # mirroring the SKIP_DATA_LOAD pattern, retune once per annual refresh
+  params_path <- paste0("data/tuned_params_", position, "_", SCORING_TYPE, ".rds")
+
+  if (skip_tuning && file.exists(params_path)) {
+    cat("Loading cached hyperparameters from", params_path, "\n")
+    best_params <- readRDS(params_path)
+  } else {
+
+    # Define Bayesian optimization function
+    # The tree count is not part of the search space, early stopping inside the
+    # CV finds the right number of rounds for each candidate configuration
+    xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree) {
+      set.seed(82525)
+
+      max_depth <- as.integer(round(max_depth))
+
+      # Validate parameters
+      if (anyNA(c(max_depth, eta, gamma, min_child_weight, subsample))) {
+        return(list(Score = -1e5, Pred = 0))
+      }
+      if (max_depth <= 0 || !is.finite(eta) || !is.finite(gamma) || !is.finite(subsample)) {
+        return(list(Score = -1e5, Pred = 0))
+      }
+
+      # Run CV, three folds are sufficient to rank candidate configurations
+      cv <- tryCatch({
+        xgb.cv(
+          data = dtrain,
+          nrounds = max_nrounds,
+          nfold = 3,
+          early_stopping_rounds = 50,
+          objective = "reg:squarederror",
+          eval_metric = "rmse",
+          tree_method = "hist",
+          max_depth = max_depth,
+          eta = eta,
+          gamma = gamma,
+          min_child_weight = min_child_weight,
+          subsample = subsample,
+          colsample_bytree = colsample_bytree,
+          verbose = 0
+        )
+      }, error = function(e) NULL)
+
+      # Handle failed CVs
+      if (is.null(cv) || is.null(cv$evaluation_log)) {
+        return(list(Score = -1e5, Pred = 0))
+      }
+
+      best_rmse <- min(cv$evaluation_log$test_rmse_mean, na.rm = TRUE)
+
+      if (!is.finite(best_rmse)) {
+        return(list(Score = -1e5, Pred = 0))
+      }
+
+      # Reporting the evaluation metric by name rather than the generic Value label
+      cat("  CV RMSE:", round(best_rmse, 3), "\n")
+
+      list(Score = -best_rmse, Pred = 0)
     }
-    if (nrounds <= 0 || max_depth <= 0) {
-      return(list(Score = -1e5, Pred = 0))
-    }
 
-    # Run CV
-    cv <- tryCatch({
-      xgb.cv(
-        data = dtrain,
-        nrounds = nrounds,
-        nfold = 5,
-        early_stopping_rounds = 50,
-        objective = "reg:squarederror",
-        eval_metric = "mae",
-        max_depth = max_depth,
-        eta = eta,
-        gamma = gamma,
-        min_child_weight = min_child_weight,
-        subsample = subsample,
-        colsample_bytree = colsample_bytree,
-        verbose = 0
-      )
-    }, error = function(e) NULL)
+    # Run Bayesian Optimization
+    opt_result <- BayesianOptimization(
+      FUN = xgb_cv_bayes,
+      bounds = list(
+        max_depth = c(3, 7),
+        eta = c(0.1, 0.3),
+        gamma = c(0, 0.1),
+        min_child_weight = c(0.05, 0.5),
+        subsample = c(0.9, 1.0),
+        colsample_bytree = c(0.7, 1.0)
+      ),
+      init_points = init_points,
+      n_iter = n_iter,
+      acq = "ucb",          # Or ei depending on strategy
+      kappa = 1.75,
+      eps = 0.4,
+      verbose = FALSE       # Per evaluation RMSE is printed inside the CV function instead
+    )
 
-    # Handle failed CVs
-    if (is.null(cv) || is.null(cv$evaluation_log)) {
-      return(list(Score = -1e5, Pred = 0))
-    }
+    best_params <- opt_result$Best_Par
+    cat("Best CV RMSE for", position, "model:", round(-opt_result$Best_Value, 3), "\n")
 
-    if (!is.finite(eta) || !is.finite(gamma) || !is.finite(subsample)) {
-      return(list(Score = -1e5, Pred = 0))
-    }
-
-    best_mae <- min(cv$evaluation_log$test_mae_mean, na.rm = TRUE)
-
-    if (!is.finite(best_mae)) {
-      return(list(Score = -1e5, Pred = 0))
-    }
-
-    list(Score = -best_mae, Pred = 0)
+    # Caching the winning hyperparameters for future runs
+    saveRDS(best_params, params_path)
   }
 
-  # Run Bayesian Optimization
-  opt_result <- BayesianOptimization(
-    FUN = xgb_cv_bayes,
-    bounds = list(
-      nrounds = c(150, 750),
-      max_depth = c(3, 7),
-      eta = c(0.1, 0.3),
-      gamma = c(0, 0.1),
-      min_child_weight = c(0.05, 0.5),
-      subsample = c(0.9, 1.0),
-      colsample_bytree = c(0.7, 1.0)
-    ),
-    init_points = 20,
-    n_iter = 30,
-    acq = "ucb",          # Or ei depending on strategy
-    kappa = 1.75,
-    eps = 0.4,
-    verbose = TRUE
-  )
-
   # Train final model with best parameters
-  best_params <- opt_result$Best_Par
 
   dvalid <- xgb.DMatrix(data = data.matrix(X_test), label = y_test)
   watchlist <- list(train = dtrain, eval = dvalid)
 
+  # The tree count is fixed high and early stopping against the holdout decides where to stop
   final_model <- xgb.train(
     data = dtrain,
-    nrounds = round(best_params[["nrounds"]]),
+    nrounds = max_nrounds,
     max_depth = round(best_params[["max_depth"]]),
     eta = best_params[["eta"]],
     gamma = best_params[["gamma"]],
@@ -136,7 +188,8 @@ train_position_model <- function(df, position, feature_cols) {
     subsample = best_params[["subsample"]],
     colsample_bytree = best_params[["colsample_bytree"]],
     objective = "reg:squarederror",
-    eval_metric = "mae",
+    eval_metric = "rmse",
+    tree_method = "hist",
     early_stopping_rounds = 25,
     watchlist = watchlist,
     verbose = 0
@@ -152,6 +205,8 @@ train_position_model <- function(df, position, feature_cols) {
     features = feature_cols,
     rmse = rmse,
     mae = mae,
+    baseline_rmse = baseline_rmse,
+    baseline_mae = baseline_mae,
     predictions = data.frame(
       Player = pos_df$Player[-train_idx],
       Year = pos_df$Year[-train_idx],
@@ -186,42 +241,6 @@ plot_feature_importance <- function(model, feature_names, top_n = 10) {
       y = "Gain"
     ) +
     theme_minimal(base_size = 13)
-}
-
-# Function to plot out actual vs predicted points
-plot_actual_vs_predicted <- function(pred_df) {
-  ggplot(pred_df, aes(x = Actual, y = Predicted)) +
-    geom_point(alpha = 0.6) +
-    geom_smooth(linewidth = 0.6, alpha = 0.85, method = "lm", se = FALSE, color = "#FFC461", linetype = "solid") +  # Regression line
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#619cff") +
-    labs(
-      title = "Predicted vs. Actual Fantasy Points",
-      x = "Actual Points (Next Year)",
-      y = "Predicted Points"
-    ) +
-    theme_minimal()
-}
-
-# Function to plot prediction error distribution
-plot_prediction_error_distribution <- function(pred_df) {
-  pred_df <- pred_df %>%
-    mutate(error = Predicted - Actual)
-
-  ggplot(pred_df, aes(x = error)) +
-    geom_histogram(
-      aes(y = after_stat(density)),           # Normalize histogram to match density curve
-      binwidth = 5,
-      fill = "#619cff",
-      color = "white",
-      alpha = 0.8
-    ) +
-    geom_density(color = "#FFC461", linewidth = 0.7, alpha = 0.9) +  # Add smoothed density line
-    labs(
-      title = "Distribution of Prediction Errors",
-      x = "Prediction Error (Predicted - Actual)",
-      y = "Density"
-    ) +
-    theme_minimal()
 }
 
 # Function to take the trained model and use it to predict upcoming season results
@@ -306,7 +325,7 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   pastel_colors <- rep(coastal_colors, length.out = length(unique(plot_df$Player)))
 
   ggplot(plot_df, aes(x = Year, y = points, color = Player, group = Player)) +
-    geom_line(linewidth = 0.9) +
+    geom_line(linewidth = 0.8, alpha = 0.8) +
     geom_text_repel(
       data = label_df,
       aes(label = Player),
@@ -333,8 +352,8 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
       plot.title = element_text(colour = "#262626", size = 16, face = "bold", hjust = 0.5),
       axis.title = element_text(colour = "#262626", size = 14),
       axis.text = element_text(colour = "#262626", size = 12),
-      panel.background = element_rect(fill = "#ECDFCF", color = NA),
-      plot.background = element_rect(fill = "#ECDFCF", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
       legend.position = "none",
       panel.grid.minor = element_blank(),
       panel.grid.major.x = element_blank(),
@@ -633,49 +652,68 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 20) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
-rb_model <- train_position_model(model_df, "RB", rb_features)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 3)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 20) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
-wr_model <- train_position_model(model_df, "WR", wr_features) # IMPORTANT: TEs will be included in the WR model by default
+# IMPORTANT: TEs will be included in the WR model by default
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 3) 
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 20) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
-# Evaluating model performance
-print(qb_model$rmse)
-print(qb_model$mae)
+# Helper to report holdout performance for one position group,
+# comparing the untuned random forest baseline against the tuned XGBoost model
+report_holdout_performance <- function(model_object, pos_label) {
+  rmse_improvement <- (model_object$baseline_rmse - model_object$rmse) / model_object$baseline_rmse * 100
+  mae_improvement <- (model_object$baseline_mae - model_object$mae) / model_object$baseline_mae * 100
 
-print(rb_model$rmse)
-print(rb_model$mae)
+  cat(
+    pos_label,
+    "\n",
+    "RMSE - baseline:", round(model_object$baseline_rmse, 2),
+    "| model:", round(model_object$rmse, 2),
+    paste0("| improvement: ", round(rmse_improvement, 1), "%"),
+    "\n",
+    "MAE - baseline:", round(model_object$baseline_mae, 2),
+    "| model:", round(model_object$mae, 2),
+    paste0("| improvement: ", round(mae_improvement, 1), "%"),
+    "\n"
+  )
+}
 
-print(wr_model$rmse)
-print(wr_model$mae)
+# Evaluating model performance on the holdout split, baseline vs tuned model
+report_holdout_performance(qb_model, "QB   ")
+report_holdout_performance(rb_model, "RB   ")
+report_holdout_performance(wr_model, "WR/TE")
 
-# Plotting actual vs predicted for each position
-plot_actual_vs_predicted(qb_model_preds) +
-  ggtitle("Quarterback Predictions")
-plot_prediction_error_distribution(qb_model_preds) +
-  ggtitle("Quarterback Prediction Error")
+# Rendering model diagnostics per position, run each plot as needed
+# QB diagnostics
+plot_actual_vs_pred(qb_model_preds, "QB")
+plot_resid_vs_pred(qb_model_preds, "QB")
+plot_resid_hist(qb_model_preds, "QB")
+plot_decile_calib(qb_model_preds, "QB")
 
-plot_actual_vs_predicted(rb_model_preds) +
-  ggtitle("Rushing Predictions")
-plot_prediction_error_distribution(rb_model_preds) +
-  ggtitle("Rushing Prediction Error")
+# RB diagnostics
+plot_actual_vs_pred(rb_model_preds, "RB")
+plot_resid_vs_pred(rb_model_preds, "RB")
+plot_resid_hist(rb_model_preds, "RB")
+plot_decile_calib(rb_model_preds, "RB")
 
-plot_actual_vs_predicted(wr_model_preds) +
-  ggtitle("Receiving Predictions")
-plot_prediction_error_distribution(wr_model_preds) +
-  ggtitle("Receiving Prediction Error")
+# WR/TE diagnostics
+plot_actual_vs_pred(wr_model_preds, "WR/TE")
+plot_resid_vs_pred(wr_model_preds, "WR/TE")
+plot_resid_hist(wr_model_preds, "WR/TE")
+plot_decile_calib(wr_model_preds, "WR/TE")
 
 # Making player predictions for the upcoming season
 qb_preds <- predict_next_year(qb_model, qb_pred_df)

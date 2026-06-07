@@ -1,7 +1,7 @@
 required_packages <- c(
   "rvest", "dplyr", "stringr", "forecast", "tidyr", "tidyverse",
   "zoo", "ggplot2", "lubridate", "data.table", "rBayesianOptimization",
-  "caret", "xgboost", "ggrepel", "nflreadr"
+  "caret", "xgboost", "ggrepel", "nflreadr", "ranger"
 )
 
 install_if_missing <- function(pkg) {
