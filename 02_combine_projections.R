@@ -1,12 +1,8 @@
 ##############################################################################
 ### Combining my predictions with FantasyPros projection data
-library(rvest)
-library(dplyr)
-library(stringr)
-library(tidyverse)
-library(data.table)
 
 # Defining Variables, ensuring global variables are read in
+# 00_globals.R loads all package dependencies for the pipeline
 source("00_globals.R")
 positions <- c("rb", "qb", "wr", "te")
 
@@ -53,10 +49,6 @@ clean_player_name <- function(name) {
 
 # Plotting predicted player trajectories
 plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10, pred_year = as.Date("2025-01-01")) {
-  library(dplyr)
-  library(ggplot2)
-  library(ggrepel)
-  
   # Dynamically create prediction year as date
   pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
   eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))

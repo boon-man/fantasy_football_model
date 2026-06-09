@@ -13,7 +13,9 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
 
-# TODO: Add in simluated prediction ranges, identify high-ceiling players
+# DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
+# TODO: Test out prediction range pipeline myself
+# TODO: Check to see if there is a better open-source model available?
 # TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # TODO: Fix Career trajectories plot to look better 
 # TODO: Add in additional features to improve model performance
@@ -30,12 +32,6 @@ train_position_model <- function(df, position, feature_cols,
                                  init_points = 10,
                                  n_iter = 20,
                                  max_nrounds = 1000) {
-  library(dplyr)
-  library(xgboost)
-  library(rBayesianOptimization)
-  library(caret)
-  library(ranger)
-
   # Filter to relevant position
   pos_df <- df %>%
     filter(
@@ -219,10 +215,6 @@ train_position_model <- function(df, position, feature_cols,
 
 # Function to plot out model feature importance
 plot_feature_importance <- function(model, feature_names, top_n = 10) {
-  library(xgboost)
-  library(ggplot2)
-  library(dplyr)
-
   # Get importance scores from xgboost
   importance <- xgb.importance(model = model, feature_names = feature_names)
 
@@ -270,12 +262,134 @@ predict_next_year <- function(model_object, pred_df) {
     )
 }
 
+# Function to generate simulated floor/ceiling prediction intervals via a player-level bootstrap
+#
+# Reuses a trained model's tuned hyperparameters and pruned feature set, so no re-tuning happens.
+# Each iteration draws players WITH replacement and replicates every drawn player's rows by how
+# many times the player was sampled, giving a true cluster bootstrap. Players never drawn form the
+# out-of-bag (OOB) set, used both for early stopping and for de-biased residual noise that widens
+# the intervals. Predictions are aggregated across bootstraps into per-player percentiles.
+generate_prediction_intervals <- function(model_object, train_df, pred_df, position,
+                                           n_bootstrap = 30,
+                                           random_state = 62820,
+                                           min_oob_rows = 200,
+                                           max_nrounds = 1000,
+                                           early_stopping_rounds = 50) {
+  # Reuse the exact feature set and tuned hyperparameters from the trained point model
+  feature_cols <- model_object$features
+  best_params <- model_object$best_params
+
+  # Filter training data to the position group, mirroring train_position_model
+  pos_df <- train_df %>%
+    filter(
+      (position == "WR" & Pos %in% c("WR", "TE")) |
+        (position == "QB" & Pos == "QB") |
+        (position == "RB" & Pos %in% c("RB", "FB"))
+    ) %>%
+    filter(!is.na(points_next_year), G > 0)
+
+  # Build the training matrix, target, and the player grouping vector used for bootstrapping
+  X_tr <- data.matrix(pos_df[, feature_cols, drop = FALSE])
+  y_tr <- pos_df$points_next_year
+  group_ids <- pos_df$player_id
+  unique_players <- unique(group_ids)
+
+  # Build the prediction matrix once, reusing predict_next_year's missing-feature handling
+  pred_pos <- pred_df
+  missing_features <- setdiff(feature_cols, colnames(pred_pos))
+  if (length(missing_features) > 0) {
+    pred_pos[missing_features] <- 0
+  }
+  X_pred <- data.matrix(pred_pos[, feature_cols, drop = FALSE])
+
+  # Storage: one row per bootstrap iteration, one column per predicted player
+  pred_mat <- matrix(NA_real_, nrow = n_bootstrap, ncol = nrow(X_pred))
+
+  for (b in seq_len(n_bootstrap)) {
+    set.seed(random_state + b)
+
+    # True player-level bootstrap: sample players with replacement, then replicate each drawn
+    # player's rows by its draw count (the fix vs. collapsing duplicate draws to a set)
+    boot_players <- sample(unique_players, size = length(unique_players), replace = TRUE)
+    draw_counts <- table(boot_players)
+    in_bag_idx <- unlist(
+      lapply(names(draw_counts), function(pid) {
+        rep(which(group_ids == pid), times = draw_counts[[pid]])
+      }),
+      use.names = FALSE
+    )
+
+    # Out-of-bag players are those never drawn this iteration
+    oob_players <- setdiff(unique_players, boot_players)
+    oob_idx <- which(group_ids %in% oob_players)
+    use_oob <- length(oob_idx) >= min_oob_rows
+
+    # Use OOB rows as the early-stopping eval set when the set is large enough
+    dtrain <- xgb.DMatrix(data = X_tr[in_bag_idx, , drop = FALSE], label = y_tr[in_bag_idx])
+    if (use_oob) {
+      doob <- xgb.DMatrix(data = X_tr[oob_idx, , drop = FALSE], label = y_tr[oob_idx])
+      watchlist <- list(train = dtrain, eval = doob)
+    } else {
+      watchlist <- list(train = dtrain)
+    }
+
+    booster <- xgb.train(
+      data = dtrain,
+      nrounds = max_nrounds,
+      max_depth = round(best_params[["max_depth"]]),
+      eta = best_params[["eta"]],
+      gamma = best_params[["gamma"]],
+      min_child_weight = best_params[["min_child_weight"]],
+      subsample = best_params[["subsample"]],
+      colsample_bytree = best_params[["colsample_bytree"]],
+      objective = "reg:squarederror",
+      eval_metric = "rmse",
+      tree_method = "hist",
+      early_stopping_rounds = if (use_oob) early_stopping_rounds else NULL,
+      watchlist = watchlist,
+      verbose = 0
+    )
+
+    base_preds <- predict(booster, newdata = X_pred)
+
+    # Widen the interval with de-biased OOB residual noise sampled with replacement
+    if (use_oob) {
+      oob_preds <- predict(booster, newdata = X_tr[oob_idx, , drop = FALSE])
+      residuals <- y_tr[oob_idx] - oob_preds
+      residuals <- residuals - mean(residuals)
+      noise <- sample(residuals, size = length(base_preds), replace = TRUE)
+      pred_mat[b, ] <- base_preds + noise
+    } else {
+      pred_mat[b, ] <- base_preds
+    }
+  }
+
+  # Aggregate across bootstraps into per-player percentile intervals
+  col_quantile <- function(p) apply(pred_mat, 2, quantile, probs = p, na.rm = TRUE)
+
+  data.frame(
+    player_id = pred_pos$player_id,
+    Player = pred_pos$Player,
+    Pos = pred_pos$Pos,
+    pred_mean = colMeans(pred_mat, na.rm = TRUE),
+    pred_p05 = col_quantile(0.05),
+    pred_p10 = col_quantile(0.10),
+    pred_p50 = col_quantile(0.50),
+    pred_p90 = col_quantile(0.90),
+    pred_p95 = col_quantile(0.95),
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      Floor = pred_p10,                  # Floor and Ceiling default to the 80% interval
+      Ceiling = pred_p90,
+      pred_width = pred_p90 - pred_p10,
+      pred_upside = pred_p90 - pred_mean,
+      pred_downside = pred_mean - pred_p10
+    )
+}
+
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
 plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10) {
-  library(dplyr)
-  library(ggplot2)
-  library(ggrepel)
-
   # Dynamically create prediction year as date
   pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
   eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
@@ -720,16 +834,31 @@ qb_preds <- predict_next_year(qb_model, qb_pred_df)
 rb_preds <- predict_next_year(rb_model, rb_pred_df)
 wr_preds <- predict_next_year(wr_model, wr_pred_df)
 
+# Generating bootstrap floor/ceiling intervals per position (reuses each model's tuned params)
+# NOTE: this fits n_bootstrap XGBoost models per position, lower n_bootstrap for a fast test run
+qb_intervals <- generate_prediction_intervals(qb_model, model_df, qb_pred_df, "QB")
+rb_intervals <- generate_prediction_intervals(rb_model, model_df, rb_pred_df, "RB")
+wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "WR")
+intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
+
 # Visualizing predicted player performance trajectories
 plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", sample_n = 8)
 plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", sample_n = 8)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", sample_n = 8)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", sample_n = 8)
 
-# Saving out final combined dataframe
+# Saving out final combined dataframe, joining the bootstrap floor/ceiling intervals on
+# cleaned name + position so the keys line up with the point predictions
 final <-
   bind_rows(qb_preds, wr_preds, rb_preds) %>%
   mutate(Player = clean_player_name(Player)) %>% # Cleaning Player Names
-  select(Player, Pos, Predicted)
+  select(Player, Pos, Predicted) %>%
+  left_join(
+    intervals_all %>%
+      mutate(Player = clean_player_name(Player)) %>%
+      select(Player, Pos, Floor, Ceiling, pred_mean,
+             pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width),
+    by = c("Player", "Pos")
+  )
 
 fwrite(final, paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))

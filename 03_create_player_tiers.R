@@ -2,10 +2,9 @@
 ### Overall Player Tiering
 # First, an overall relative value tier will be created for each player regardless of position
 # Next, we will create relative value tiers for each player respective to their position
-library(tidyverse)
-library(data.table)
 
 # Reading in global variables if not already set
+# 00_globals.R loads all package dependencies for the pipeline
 source("00_globals.R")
 
 ## SELECT EITHER UNDERDOG FANTASY OR ESPN ROSTER CUTOFF SUGGESTIONS
@@ -48,9 +47,6 @@ WR_DAMP <- 1.2
 
 # Function for estimating optimal K value
 plot_wss_elbow <- function(player_df, pos = NULL, max_k = 25) {
-  library(dplyr)
-  library(ggplot2)
-  
   # Optionally filter by position
   df_attrs <- player_df %>%
     { if (!is.null(pos)) filter(., Pos == pos) else . } %>%
