@@ -15,6 +15,11 @@ SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip B
 
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
 # TODO: Test out prediction range pipeline myself
+# TODO: Find material to read more about prediction range OOB methodology
+# DONE: Include metric to identify high-potential players
+# TODO: Include random state in training model
+# TODO: Remove columns with high correlation?
+# TODO: Check to see if there are any other data sources to add in for additional model features
 # TODO: Check to see if there is a better open-source model available?
 # TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # TODO: Fix Career trajectories plot to look better 
@@ -383,8 +388,13 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       Floor = pred_p10,                  # Floor and Ceiling default to the 80% interval
       Ceiling = pred_p90,
       pred_width = pred_p90 - pred_p10,
-      pred_upside = pred_p90 - pred_mean,
-      pred_downside = pred_mean - pred_p10
+      pred_upside = pred_p90 - pred_mean,    # ceiling distance above the mean
+      pred_downside = pred_mean - pred_p10,  # floor distance below the mean
+      # Asymmetry score: upside earned per unit of downside risk. A small floor
+      # (2% of the absolute mean, minimum 0.02) keeps the ratio stable when downside
+      # is near zero. High values flag high-ceiling / contained-floor breakout candidates.
+      downside_floor = 0.02 * pmax(abs(pred_mean), 1.0),
+      implied_upside = pred_upside / (pred_downside + downside_floor)
     )
 }
 
@@ -453,7 +463,7 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
       force = 1,
       max.overlaps = Inf
     ) +
-    scale_x_date(expand = expansion(mult = c(0.01, 0.2))) +
+    scale_x_date(expand = expansion(mult = c(0.01, 0.2)), date_breaks = "1 year", date_labels = "%Y") +
     coord_cartesian(clip = "off") +
     scale_color_manual(values = pastel_colors) +
     labs(
@@ -653,8 +663,6 @@ combined <-
   # Only apply infinity and NA fixes to numeric columns
   mutate(across(where(is.numeric), ~ ifelse(is.infinite(.), NA, .))) %>%
   mutate(across(where(is.numeric), ~ replace_na(., 0)))
-
-## TODO: Remove columns with high correlation?
 
 # Filtering for players with extremely few points in the next year, these players would not be drafted regardless
 # Removing the EVAL_YEAR data from the training set, as it is the evaluation year
@@ -857,7 +865,8 @@ final <-
     intervals_all %>%
       mutate(Player = clean_player_name(Player)) %>%
       select(Player, Pos, Floor, Ceiling, pred_mean,
-             pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width),
+             pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width,
+             pred_upside, pred_downside, implied_upside),
     by = c("Player", "Pos")
   )
 
