@@ -23,7 +23,7 @@ RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.
 # TODO: Check to see if there are any other data sources to add in for additional model features
 # TODO: Check to see if there is a better open-source model available?
 # TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
-# TODO: Fix Career trajectories plot to look better 
+# DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
 # TODO: Add in additional features to improve model performance
 
 
@@ -408,7 +408,7 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
-plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10) {
+plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10, n_tiers = 4) {
   # Dynamically create prediction year as date
   pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
   eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
@@ -427,16 +427,32 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   # 3. Combine both
   full_df <- bind_rows(hist_df, preds)
 
-  # 4. Filter players with > 50 pts in the most recent season
-  active_players <- hist_df %>%
-    filter(Year == eval_year, points > 50) %>%
-    distinct(Player) %>%
-    pull(Player)
+  # 4. Tier-aware player selection.
+  # Bucket eval-year scorers into tiers by their most recent season, pick one tier at random,
+  # then sample players within it. This gives a varied-but-readable set: everyone shares a
+  # similar scoring band so the y-axis isn't distorted by mixing a star with a deep backup
+  # (e.g. prime Peyton Manning next to Dan Orlovsky).
+  eval_scores <- hist_df %>%
+    filter(Year == eval_year, points > 0) %>%
+    distinct(Player, points) %>%
+    mutate(tier = ntile(points, n_tiers))
 
-  sampled_players <- sample(active_players, min(sample_n, length(active_players)))
+  # Index-based pick avoids sample()'s length-1 gotcha (sample(n, 1) would draw from 1:n)
+  available_tiers <- unique(eval_scores$tier)
+  chosen_tier <- available_tiers[sample(length(available_tiers), 1)]
+
+  tier_players <- eval_scores %>%
+    filter(tier == chosen_tier) %>%
+    pull(Player)
+  sampled_players <- sample(tier_players, min(sample_n, length(tier_players)))
 
   plot_df <- full_df %>%
     filter(Player %in% sampled_players)
+
+  # Split each trajectory into a solid historical leg and a dashed eval->prediction leg.
+  # Both include the eval-year point, so the dashed projection connects seamlessly to the line.
+  hist_lines <- plot_df %>% filter(Year <= eval_year)
+  pred_lines <- plot_df %>% filter(Year >= eval_year)
 
   # 5. Labels at final year (projection year)
   label_df <- plot_df %>%
@@ -458,7 +474,9 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   pastel_colors <- rep(coastal_colors, length.out = length(unique(plot_df$Player)))
 
   ggplot(plot_df, aes(x = Year, y = points, color = Player, group = Player)) +
-    geom_line(linewidth = 0.8, alpha = 0.8) +
+    # Solid historical trajectory, then a dashed leg into the prediction year
+    geom_line(data = hist_lines, linewidth = 0.8, alpha = 0.55) +
+    geom_line(data = pred_lines, linewidth = 0.8, alpha = 0.55, linetype = "dashed") +
     geom_text_repel(
       data = label_df,
       aes(label = Player),
@@ -489,9 +507,12 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
       plot.background = element_rect(fill = "white", color = NA),
       legend.position = "none",
       panel.grid.minor = element_blank(),
-      panel.grid.major.x = element_blank(),
-      panel.grid.major.y = element_line(color = "#FFFFFF", linewidth = 0.3),
-      axis.line = element_line(color = "#FFFFFF", linewidth = 0.4)
+      # Faint yearly vertical guides, plus light horizontal guides for reading point values
+      panel.grid.major.x = element_line(color = "#E6E6E6", linewidth = 0.3),
+      panel.grid.major.y = element_line(color = "#EFEFEF", linewidth = 0.3),
+      # Dark "L" shaped axes along the left and bottom
+      axis.line.x = element_line(color = "#4D4D4D", linewidth = 0.5),
+      axis.line.y = element_line(color = "#4D4D4D", linewidth = 0.5)
     )
 }
 
