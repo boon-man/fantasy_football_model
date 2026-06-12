@@ -12,12 +12,13 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
+RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
 # TODO: Test out prediction range pipeline myself
 # TODO: Find material to read more about prediction range OOB methodology
 # DONE: Include metric to identify high-potential players
-# TODO: Include random state in training model
+# DONE: Random state added to train_position_model (RANDOM_STATE config knob) for alternate scenarios
 # TODO: Remove columns with high correlation?
 # TODO: Check to see if there are any other data sources to add in for additional model features
 # TODO: Check to see if there is a better open-source model available?
@@ -32,11 +33,15 @@ SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip B
 #   init_points : random configurations evaluated before the Bayesian search starts
 #   n_iter      : Bayesian optimization iterations after initialization
 #   max_nrounds : tree count ceiling for CV and the final fit, early stopping decides the actual count
+#   random_state: single seed threaded through the train/test split, baseline, tuning, and final
+#                 fit. Same value reproduces a run exactly; change it to generate alternate draft
+#                 scenarios so production isn't over-exposed to one model realization.
 train_position_model <- function(df, position, feature_cols,
                                  skip_tuning = SKIP_TUNING,
                                  init_points = 10,
                                  n_iter = 20,
-                                 max_nrounds = 1000) {
+                                 max_nrounds = 1000,
+                                 random_state = 62820) {
   # Filter to relevant position
   pos_df <- df %>%
     filter(
@@ -57,7 +62,7 @@ train_position_model <- function(df, position, feature_cols,
   }
 
   # Train-test split
-  set.seed(62820)
+  set.seed(random_state)
   train_idx <- createDataPartition(y, p = 0.8, list = FALSE)
   X_train <- X[train_idx, ]
   y_train <- y[train_idx]
@@ -75,7 +80,7 @@ train_position_model <- function(df, position, feature_cols,
   baseline_train[is.na(baseline_train)] <- 0
   baseline_test[is.na(baseline_test)] <- 0
 
-  set.seed(62820)
+  set.seed(random_state)
   baseline_model <- ranger(x = baseline_train, y = y_train, num.trees = 500)
 
   # Scoring the baseline on the holdout split
@@ -98,7 +103,8 @@ train_position_model <- function(df, position, feature_cols,
     # The tree count is not part of the search space, early stopping inside the
     # CV finds the right number of rounds for each candidate configuration
     xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree) {
-      set.seed(82525)
+      # Reset to random_state on every call so all candidates are scored on identical CV folds
+      set.seed(random_state)
 
       max_depth <- as.integer(round(max_depth))
 
@@ -120,6 +126,7 @@ train_position_model <- function(df, position, feature_cols,
           objective = "reg:squarederror",
           eval_metric = "rmse",
           tree_method = "hist",
+          seed = random_state,
           max_depth = max_depth,
           eta = eta,
           gamma = gamma,
@@ -147,7 +154,8 @@ train_position_model <- function(df, position, feature_cols,
       list(Score = -best_rmse, Pred = 0)
     }
 
-    # Run Bayesian Optimization
+    # Run Bayesian Optimization, seeding so the random initial configurations are reproducible per random_state
+    set.seed(random_state)
     opt_result <- BayesianOptimization(
       FUN = xgb_cv_bayes,
       bounds = list(
@@ -191,6 +199,7 @@ train_position_model <- function(df, position, feature_cols,
     objective = "reg:squarederror",
     eval_metric = "rmse",
     tree_method = "hist",
+    seed = random_state,
     early_stopping_rounds = 25,
     watchlist = watchlist,
     verbose = 0
@@ -774,20 +783,20 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 20) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
-rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 3)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 20) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
 # IMPORTANT: TEs will be included in the WR model by default
-wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 3) 
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 20) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
@@ -844,9 +853,9 @@ wr_preds <- predict_next_year(wr_model, wr_pred_df)
 
 # Generating bootstrap floor/ceiling intervals per position (reuses each model's tuned params)
 # NOTE: this fits n_bootstrap XGBoost models per position, lower n_bootstrap for a fast test run
-qb_intervals <- generate_prediction_intervals(qb_model, model_df, qb_pred_df, "QB")
-rb_intervals <- generate_prediction_intervals(rb_model, model_df, rb_pred_df, "RB")
-wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "WR")
+qb_intervals <- generate_prediction_intervals(qb_model, model_df, qb_pred_df, "QB", random_state = RANDOM_STATE)
+rb_intervals <- generate_prediction_intervals(rb_model, model_df, rb_pred_df, "RB", random_state = RANDOM_STATE)
+wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "WR", random_state = RANDOM_STATE)
 intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
 
 # Visualizing predicted player performance trajectories
