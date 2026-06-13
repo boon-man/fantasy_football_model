@@ -179,15 +179,14 @@ kmeans_attrs <- kmeans(total_attrs, centers = 9, nstart = 50)
 
 total_df$Tier <- kmeans_attrs$cluster
 
-final_df <- 
+# Build the tier dataset straight from total_df, which already carries every needed column.
+# This replaces a name-based self-join that collided for same-named players (e.g. the two
+# Adrian Petersons). Re-rank by cluster mean so Tier 1 is the most valuable group.
+tier_df <-
   total_df %>%
-  select(Player, FP_Pos_Ranking, Pos_Ranking, Overall_Ranking, Relative_Value, Tier)
-
-# Creating overall tiering dataset
-tier_df <- 
-  player_df %>% 
-  select(Player, Pos, Model_Prediction, FantasyPros_Prediction, Final_Projection) %>%
-  inner_join(final_df, by = 'Player') %>%
+  select(player_id, Player, Pos, Model_Prediction, FantasyPros_Prediction, Final_Projection,
+         Floor, Ceiling, implied_upside,   # model's own range/upside, carried to the final sheet
+         FP_Pos_Ranking, Pos_Ranking, Overall_Ranking, Relative_Value, Tier) %>%
   group_by(Tier) %>%
   mutate(tier_avg = mean(Relative_Value)) %>%
   ungroup() %>%
@@ -221,8 +220,9 @@ te_df <- assign_positional_tiers(tier_df, pos = "TE", k = 6)
 # Combine all positional tiers into a single dataframe
 final_df <- bind_rows(list(qb_df, rb_df, wr_df, te_df)) %>%
   arrange(desc(Relative_Value), Tier, Pos_Tier) %>%
-  select(Player, Pos, Model_Prediction, FantasyPros_Prediction, 
-         Final_Projection, FP_Pos_Ranking, Pos_Ranking, Overall_Ranking, 
+  select(player_id, Player, Pos, Model_Prediction, FantasyPros_Prediction,
+         Final_Projection, Floor, Ceiling, implied_upside,
+         FP_Pos_Ranking, Pos_Ranking, Overall_Ranking,
          Relative_Value, Tier, Pos_Tier)
 
 # TODO: create a scatterplot of player projections, with color grouping by position tier?

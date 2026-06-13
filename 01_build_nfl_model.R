@@ -267,9 +267,9 @@ predict_next_year <- function(model_object, pred_df) {
   # Predict using the xgboost booster model
   predicted_points <- predict(model_object$model, newdata = X_pred_matrix)
 
-  # Return dataframe with predictions
+  # Return dataframe with predictions, keeping player_id so same-named players stay distinct
   pred_df %>%
-    select(Player, Year, Pos) %>%
+    select(player_id, Player, Year, Pos) %>%
     mutate(
       Predicted = predicted_points,
       Pred_Year = as.Date(paste0(as.numeric(format(Year, "%Y")) + 1, "-01-01"))
@@ -425,7 +425,7 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
-plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10, n_tiers = 4) {
+plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10, n_tiers = 2) {
   # Dynamically create prediction year as date
   pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
   eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
@@ -902,19 +902,19 @@ plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", sample_n = 8)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", sample_n = 8)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", sample_n = 8)
 
-# Saving out final combined dataframe, joining the bootstrap floor/ceiling intervals on
-# cleaned name + position so the keys line up with the point predictions
+# Saving out final combined dataframe. Joining the bootstrap floor/ceiling intervals on the unique
+# player_id (not name) so players who share a name + position - e.g. the two Adrian Petersons -
+# stay distinct instead of cross-matching. player_id is retained for downstream disambiguation.
 final <-
   bind_rows(qb_preds, wr_preds, rb_preds) %>%
   mutate(Player = clean_player_name(Player)) %>% # Cleaning Player Names
-  select(Player, Pos, Predicted) %>%
+  select(player_id, Player, Pos, Predicted) %>%
   left_join(
     intervals_all %>%
-      mutate(Player = clean_player_name(Player)) %>%
-      select(Player, Pos, Floor, Ceiling, pred_mean,
+      select(player_id, Floor, Ceiling, pred_mean,
              pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width,
              pred_upside, pred_downside, implied_upside),
-    by = c("Player", "Pos")
+    by = "player_id"
   )
 
 fwrite(final, paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))

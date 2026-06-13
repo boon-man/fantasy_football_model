@@ -158,11 +158,25 @@ fp_cleaned <-
   fp_projections %>%
   mutate(Player_clean = clean_player_name(Player))
 
-# Join using cleaned names, keep original names for reference
-combined_projections <- 
+# Join using cleaned names (FantasyPros ships no player_id), but keep the model's unique
+# player_id so same-named players stay distinct. When two same-named, same-position model
+# players (e.g. the two Adrian Petersons) both match a single FantasyPros row, the expert
+# projection is kept only on the highest-projected (active) player; the other falls back to a
+# model-only blend and is dropped later by the no-FantasyPros filter when it has no projection.
+combined_projections <-
   player_df_cleaned %>%
-  full_join(fp_cleaned, by = c("Player_clean", "Pos")) %>%
-  select(Player = Player.x, Pos, Predicted, FantasyPros_Player = Player.y, Projected_Points) %>%
+  full_join(fp_cleaned, by = c("Player_clean", "Pos"), relationship = "many-to-many") %>%
+  group_by(Player_clean, Pos) %>%
+  mutate(
+    is_fp_primary = is.na(Predicted) | row_number(desc(Predicted)) == 1,
+    Projected_Points = if_else(is_fp_primary, Projected_Points, NA_real_),
+    Player.y = if_else(is_fp_primary, Player.y, NA_character_)
+  ) %>%
+  ungroup() %>%
+  # Floor/Ceiling/implied_upside are carried through untouched - they stay the model's own
+  # expectation (not manually adjusted, not blended), shown beside the blended Final_Projection
+  select(player_id, Player = Player.x, Pos, Predicted, FantasyPros_Player = Player.y, Projected_Points,
+         Floor, Ceiling, implied_upside) %>%
   mutate(PosGroup = if_else(Pos == "QB", "QB", "SKILL")) # Grouping QBs separately from skill positions for blending
 
 # Adjusting model predictions for players that are expected to miss games during the upcoming season
@@ -236,10 +250,11 @@ blended_df <-
 final_df <- 
   blended_df %>%
   mutate(Player = coalesce(Player, FantasyPros_Player)) %>%
-  select(Player, Pos, 
+  select(player_id, Player, Pos,    # player_id is NA for FantasyPros-only rookies (no model row)
          Model_Prediction = Predicted,
          FantasyPros_Prediction = Projected_Points,
-         Final_Projection = final_projection) %>%
+         Final_Projection = final_projection,
+         Floor, Ceiling, implied_upside) %>%  # model's own range, carried through untouched
   arrange(Pos, desc(Final_Projection)) %>%
   filter(!is.na(FantasyPros_Prediction)) # Removing players without a FantasyPros Projection, these players are out of the league or retired
 
