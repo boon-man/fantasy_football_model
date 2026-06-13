@@ -283,8 +283,13 @@ predict_next_year <- function(model_object, pred_df) {
 # many times the player was sampled, giving a true cluster bootstrap. Players never drawn form the
 # out-of-bag (OOB) set, used both for early stopping and for de-biased residual noise that widens
 # the intervals. Predictions are aggregated across bootstraps into per-player percentiles.
+#
+# Each fitted model contributes n_noise_draws residual-perturbed prediction samples rather than
+# one, so the total Monte Carlo sample per player is n_bootstrap * n_noise_draws. This decouples
+# the sample size from the (expensive) model count, stabilizing the tail percentiles cheaply.
 generate_prediction_intervals <- function(model_object, train_df, pred_df, position,
                                            n_bootstrap = 30,
+                                           n_noise_draws = 50,
                                            random_state = 62820,
                                            min_oob_rows = 200,
                                            max_nrounds = 1000,
@@ -315,9 +320,10 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     pred_pos[missing_features] <- 0
   }
   X_pred <- data.matrix(pred_pos[, feature_cols, drop = FALSE])
+  n_pred <- nrow(X_pred)
 
-  # Storage: one row per bootstrap iteration, one column per predicted player
-  pred_mat <- matrix(NA_real_, nrow = n_bootstrap, ncol = nrow(X_pred))
+  # Storage: n_noise_draws rows per bootstrap (stacked), one column per predicted player
+  pred_mat <- matrix(NA_real_, nrow = n_bootstrap * n_noise_draws, ncol = n_pred)
 
   for (b in seq_len(n_bootstrap)) {
     set.seed(random_state + b)
@@ -366,15 +372,26 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
 
     base_preds <- predict(booster, newdata = X_pred)
 
-    # Widen the interval with de-biased OOB residual noise sampled with replacement
+    # Rows of pred_mat reserved for this bootstrap's noise draws
+    row_start <- (b - 1) * n_noise_draws + 1
+    row_end <- b * n_noise_draws
+
+    # Replicate the model's point predictions across the noise draws, then perturb each draw
+    base_block <- matrix(base_preds, nrow = n_noise_draws, ncol = n_pred, byrow = TRUE)
+
+    # Widen the interval with de-biased OOB residual noise, drawn independently for every
+    # (draw, player) cell. Many draws per fitted model stabilize the tails without more fits.
     if (use_oob) {
       oob_preds <- predict(booster, newdata = X_tr[oob_idx, , drop = FALSE])
       residuals <- y_tr[oob_idx] - oob_preds
       residuals <- residuals - mean(residuals)
-      noise <- sample(residuals, size = length(base_preds), replace = TRUE)
-      pred_mat[b, ] <- base_preds + noise
+      noise_block <- matrix(
+        sample(residuals, size = n_noise_draws * n_pred, replace = TRUE),
+        nrow = n_noise_draws, ncol = n_pred
+      )
+      pred_mat[row_start:row_end, ] <- base_block + noise_block
     } else {
-      pred_mat[b, ] <- base_preds
+      pred_mat[row_start:row_end, ] <- base_block
     }
   }
 
