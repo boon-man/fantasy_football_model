@@ -15,8 +15,8 @@ SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip B
 RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
-# TODO: Test out prediction range pipeline myself
-# TODO: Find material to read more about prediction range OOB methodology
+# DONE: Test out prediction range pipeline myself
+# DONE: Find material to read more about prediction range OOB methodology
 # DONE: Include metric to identify high-potential players
 # DONE: Random state added to train_position_model (RANDOM_STATE config knob) for alternate scenarios
 # TODO: Remove columns with high correlation?
@@ -430,21 +430,21 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
   eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
 
-  # 1. Historical data
+  # Historical data
   hist_df <- combined_df %>%
     filter(Pos == pos_group) %>%
     select(Player, Year, points)
 
-  # 2. Predicted values
+  # Predicted values
   preds <- pred_df %>%
     filter(Pos == pos_group) %>%
     select(Player, Pred_Year, Predicted) %>%
     rename(Year = Pred_Year, points = Predicted)
 
-  # 3. Combine both
+  # Combine both
   full_df <- bind_rows(hist_df, preds)
 
-  # 4. Tier-aware player selection.
+  # ier-aware player selection.
   # Bucket eval-year scorers into tiers by their most recent season, pick one tier at random,
   # then sample players within it. This gives a varied-but-readable set: everyone shares a
   # similar scoring band so the y-axis isn't distorted by mixing a star with a deep backup
@@ -561,6 +561,23 @@ combined <-
   mutate(Year = as.Date(as.yearmon(Year))) |>
   filter(Pos %in% c('WR', 'TE', 'RB', 'QB'))
 
+# Trailing index of a player's best season up to (and including) each row.
+# Used so "years since peak" only ever looks backward; a whole-career which.max()
+# would leak future seasons (including next year's target) into the feature.
+running_argmax <- function(x) {
+  best_i <- 1L
+  best_v <- -Inf
+  out <- integer(length(x))
+  for (i in seq_along(x)) {
+    if (!is.na(x[i]) && x[i] > best_v) {
+      best_v <- x[i]
+      best_i <- i
+    }
+    out[i] <- best_i
+  }
+  out
+}
+
 # Feature engineering
 combined <-
   combined %>%
@@ -636,6 +653,9 @@ combined <-
     passing_epa_per_att_3yr = rollapplyr(passing_epa_per_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_adj_net_yards_att_3yr = rollapplyr(passing_adj_net_yards_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_yards_att_3yr = rollapplyr(passing_yards_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    passing_cpoe_3yr = rollapplyr(passing_cpoe, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    pacr_3yr = rollapplyr(pacr, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    passing_adot_3yr = rollapplyr(passing_adot, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
 
     # Rushing efficiency metrics, EPA based rates replace the legacy PFR success rate
     rush_efficiency = rush_yds * (1 + rush_epa_per_att),
@@ -659,11 +679,17 @@ combined <-
     catch_percent_3yr = rollapplyr(catch_percent, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     adjusted_targets_3yr = rollapplyr(adjusted_targets, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     targets_per_game_3yr = rollapplyr(targets_per_game, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    wopr_3yr = rollapplyr(wopr, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    target_share_3yr = rollapplyr(target_share, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    air_yards_share_3yr = rollapplyr(air_yards_share, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    racr_3yr = rollapplyr(racr, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
 
     # General career info
     career_total_points = cumsum(replace_na(points, 0)) - replace_na(points, 0),
     seasons_played = row_number() - 1,
-    years_since_peak = seasons_played - which.max(points),
+    # Seasons elapsed since the player's best year *so far* (trailing argmax, not whole-career
+    # which.max) — 0 in a new career-best season, growing as a player moves past their prime.
+    years_since_peak = row_number() - running_argmax(points),
 
     # Per-game efficiency
     avg_points_per_game = if_else(G > 0, points / G, NA_real_),
@@ -738,7 +764,7 @@ qb_features <- c(
   "Age", "G", "Year", "QBR", "Rate", "adj_ypa",
   "age_points_interaction", "age_sq",
   "adjusted_productivity", "adjusted_productivity_3yr", "adjusted_productivity_trend",
-  "avg_games_3yr",
+  "avg_games_3yr", "avg_passing_int_3yr",
   "avg_passing_td_3yr", "avg_passing_yds_3yr", "avg_points_3yr", "avg_points_per_game",
   "avg_points_per_game_3yr", "avg_qbr_3yr", "avg_rushing_yds_3yr",
   "career_adjusted_productivity", "career_games",
@@ -749,6 +775,8 @@ qb_features <- c(
   "num_missing_years", "num_teams_prior",
   "qb_yards", "qb_yards_3yr", "passing_1D", "passing_adj_net_yards_att",
   "passing_adj_net_yards_att_3yr", "passing_att", "passing_avg_yards_att",
+  "passing_adot", "passing_adot_3yr", "passing_cpoe", "passing_cpoe_3yr",
+  "pacr", "pacr_3yr",
   "passing_comp", "passing_comp_pct", "passing_epa_per_att", "passing_epa_per_att_3yr",
   "passing_int", "passing_int_pct",
   "passing_net_yards_att", "passing_sack",
@@ -785,6 +813,7 @@ rb_features <- c(
   "receiving_epa_per_target", "receiving_epa_per_target_3yr",
   "receiving_rec_g", "receiving_td", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr",
+  "target_share", "target_share_3yr", "wopr", "wopr_3yr",
   "rush_1D", "rush_att", "rush_attempts_per_game", "rush_efficiency",
   "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
@@ -813,6 +842,8 @@ wr_features <- c(
   "receiving_epa_per_target", "receiving_epa_per_target_3yr",
   "receiving_rec_g", "receiving_td", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr",
+  "target_share", "target_share_3yr", "air_yards_share", "air_yards_share_3yr",
+  "wopr", "wopr_3yr", "racr", "racr_3yr",
   "rush_att", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "targets_per_game", "targets_per_game_3yr",

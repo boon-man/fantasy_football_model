@@ -221,6 +221,9 @@ build_player_season_stats <- function(start_year, end_year) {
       sack_percent = if_else(dropbacks > 0, (sacks_suffered / dropbacks) * 100, 0),
       passing_net_yards_att = if_else(dropbacks > 0, (passing_yards - sack_yards_lost) / dropbacks, 0),
       passing_adj_net_yards_att = if_else(dropbacks > 0, (passing_yards - sack_yards_lost + (20 * passing_tds) - (45 * passing_interceptions)) / dropbacks, 0),
+      # Average depth of target: how far downfield the QB throws, isolating the air-yards
+      # component the total-yards metrics above conflate with yards after the catch
+      passing_adot = if_else(attempts > 0, passing_air_yards / attempts, 0),
       Rate = if_else(attempts > 0, compute_passer_rating(completions, attempts, passing_yards, passing_tds, passing_interceptions), 0)
     ) |>
     # Renaming to the column names the downstream feature engineering and models expect
@@ -247,6 +250,12 @@ build_player_season_stats <- function(start_year, end_year) {
       receiving_yards_target,
       receiving_air_yards,
       receiving_yards_after_catch,
+      # Opportunity-share metrics: how much of the team's passing-game pie a player commands.
+      # Stickier year over year than raw volume and inherently team-context adjusted.
+      target_share,
+      air_yards_share,
+      wopr,
+      racr,
       rush_att = carries,
       rush_yds = rushing_yards,
       rush_td = rushing_tds,
@@ -277,6 +286,10 @@ build_player_season_stats <- function(start_year, end_year) {
       sack_percent,
       passing_net_yards_att,
       passing_adj_net_yards_att,
+      passing_adot,
+      # QB skill/efficiency signals: completion % over expected and passer air conversion ratio
+      passing_cpoe,
+      pacr,
       wins
     ) |>
     # Undrafted players receive a draft position value beyond the final pick of the draft
