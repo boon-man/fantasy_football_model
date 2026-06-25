@@ -595,6 +595,13 @@ combined <-
     # How many years of a player's career are missing from the data?
     num_missing_years = pmax(START_YEAR - rookie_year, 0),
 
+    # Draft capital that boosts highly drafted players early then fades out, replacing raw
+    # draft_number so pedigree stops influencing predictions past the rookie-contract window.
+    # Base value is exponential by pick (1st overall best, undrafted ~0); a linear decay drops
+    # it 25% per league year and pins it to 0 once a player is 4+ years in.
+    years_in_league = pmax(0, year_num - estimated_rookie_year),
+    draft_capital = exp(-(draft_number - 1) / 40) * pmax(0, 1 - 0.25 * years_in_league),
+
     # Adding an age squared feature, to capture the potential non-linear relationship between age and performance
     age_sq = Age^2,
 
@@ -771,7 +778,7 @@ qb_features <- c(
   "career_adjusted_productivity", "career_games",
   "career_passing_td", "career_passing_yards", "career_rushing_td",
   "career_rushing_yds", "career_top_finish_count", "career_total_points",
-  "consecutive_decline", "draft_number", "estimated_rookie_year", "games_last_year",
+  "consecutive_decline", "draft_capital", "estimated_rookie_year", "games_last_year",
   "injured_last_year", "missing_pre_2006",
   "num_missing_years", "num_teams_prior",
   "qb_yards", "qb_yards_3yr", "passing_1D", "passing_adj_net_yards_att",
@@ -804,7 +811,7 @@ rb_features <- c(
   "career_games", "career_receiving_td",
   "career_receiving_yds", "career_rushing_td", "career_rushing_yds",
   "career_top_finish_count", "career_total_points", "career_touches",
-  "consecutive_decline", "draft_number", "estimated_rookie_year",
+  "consecutive_decline", "draft_capital", "estimated_rookie_year",
   "explosive_catch_rate", "explosive_receiving_eff", "explosive_yards_proxy",
   "fbl_per_att", "games_last_year", "injured_last_year", "missing_pre_2006",
   "num_teams_prior", "num_missing_years",
@@ -833,7 +840,7 @@ wr_features <- c(
   "career_games", "career_receiving_td",
   "career_receiving_yds", "career_rushing_yds", "career_top_finish_count",
   "career_total_points", "catch_percent", "catch_percent_3yr", "consecutive_decline",
-  "draft_number", "estimated_rookie_year",
+  "draft_capital", "estimated_rookie_year",
   "explosive_catch_rate", "explosive_receiving_eff", "explosive_yards_proxy",
   "games_last_year", "injured_last_year", "log_career_total_points",
   "missing_pre_2006", "num_teams_prior", "num_missing_years",
