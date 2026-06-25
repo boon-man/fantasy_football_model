@@ -40,7 +40,7 @@ add_prediction_diff <- function(pred_df) {
 build_outlier_labels <- function(pred_df, top_n) {
   pred_df |>
     slice_max(abs(prediction_diff), n = top_n, with_ties = FALSE) |>
-    mutate(label = paste0(Player, " (", Year + 1, ")"))
+    mutate(label = paste0(Player, " (", lubridate::year(Year) + 1, ")"))
 }
 
 # === DIAGNOSTIC PLOTS === #
@@ -81,7 +81,7 @@ plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15) {
       min.segment.length = 0, max.overlaps = Inf
     ) +
     annotate(
-      "text", x = 0.15 * max_x, y = 0.9 * max_y,
+      "text", x = 0.45 * max_x, y = 0.8 * max_y,
       label = "Overperformers", fontface = "bold", size = 4.5, alpha = 0.7
     ) +
     annotate(
@@ -149,15 +149,11 @@ plot_resid_hist <- function(pred_df, pos_label = "", band = 50, binwidth = 10) {
   within_pct <- round(mean(abs(df$prediction_diff) <= band) * 100)
 
   ggplot(df, aes(x = prediction_diff)) +
-    annotate("rect", xmin = -band, xmax = band, ymin = -Inf, ymax = Inf, alpha = 0.18, fill = "lightgrey") +
-    geom_histogram(binwidth = binwidth, fill = NFL_COLOR_PALETTE[3], color = "white", alpha = 0.8) +
-    annotate(
-      "text", x = quantile(df$prediction_diff, 0.85), y = Inf, vjust = 2, hjust = 0,
-      label = paste0(within_pct, "% of predictions within +/- ", band),
-      size = 4.5, alpha = 0.7
-    ) +
+    annotate("rect", xmin = -band, xmax = band, ymin = -Inf, ymax = Inf, alpha = 0.25, fill = "lightgrey") +
+    geom_histogram(binwidth = binwidth, fill = NFL_COLOR_PALETTE[4], color = "white", alpha = 0.9) +
     labs(
       title = paste(pos_label, "Distribution of Prediction Errors"),
+      subtitle = paste0(within_pct, "% of predictions within +/- ", band),
       x = "Prediction Diff (Predicted - Actual)",
       y = NULL
     ) +
@@ -176,8 +172,8 @@ plot_resid_hist <- function(pred_df, pos_label = "", band = 50, binwidth = 10) {
 #' pred_df : data.frame with Actual and Predicted columns
 #' pos_label : character, position group name used in the plot title
 #' n_deciles : integer, number of quantile bins (default 10)
-#' nudge_y : numeric, vertical offset for the percentage labels (default 10 points)
-plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y = 10) {
+#' nudge_y : numeric, vertical offset for the percentage labels (default 5 points)
+plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y = 5) {
 
   # Binning into prediction deciles and averaging within each bin
   # Positive pct labels mean actuals ran above the model (underprediction)
@@ -195,8 +191,8 @@ plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y =
 
   ggplot(decile_calib, aes(x = mean_pred, y = mean_actual)) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "lightgrey", alpha = 0.8) +
-    geom_line(color = NFL_COLOR_PALETTE[4], alpha = 0.9, linewidth = 0.75) +
-    geom_point(color = NFL_COLOR_PALETTE[4], alpha = 0.9, size = 2) +
+    geom_line(color = NFL_COLOR_PALETTE[3], alpha = 0.9, linewidth = 0.75) +
+    geom_point(color = NFL_COLOR_PALETTE[3], alpha = 0.9, size = 2) +
     geom_text(
       aes(label = diff_label),
       nudge_y = nudge_y, color = "#555555", fontface = "bold", size = 3

@@ -10,17 +10,18 @@ source("functions.R")   # Loading shared cleaning and nflverse data intake funct
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
-SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
+SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
 RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
+# TODO: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
 # DONE: Test out prediction range pipeline myself
 # DONE: Find material to read more about prediction range OOB methodology
 # DONE: Include metric to identify high-potential players
 # DONE: Random state added to train_position_model (RANDOM_STATE config knob) for alternate scenarios
 # TODO: Remove columns with high correlation?
-# TODO: Check to see if there are any other data sources to add in for additional model features
+# DONE: Check to see if there are any other data sources to add in for additional model features
 # TODO: Check to see if there is a better open-source model available?
 # TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
@@ -853,20 +854,20 @@ wr_features <- c(
 
 # Creating models and making predictions for each major positional group
 qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
-plot_feature_importance(qb_model$model, qb_model$features, top_n = 20) +
+plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
 rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
-plot_feature_importance(rb_model$model, rb_model$features, top_n = 20) +
+plot_feature_importance(rb_model$model, rb_model$features, top_n = 25) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
 
 # IMPORTANT: TEs will be included in the WR model by default
 wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
-plot_feature_importance(wr_model$model, wr_model$features, top_n = 20) +
+plot_feature_importance(wr_model$model, wr_model$features, top_n = 25) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
   mutate(diff = Predicted - Actual)
