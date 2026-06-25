@@ -18,8 +18,14 @@ install_if_missing <- function(pkg) {
 
 invisible(lapply(required_packages, install_if_missing))
 
-EVAL_YEAR <- 2007                   # Final year in training dataframe
+EVAL_YEAR <- 2024                   # Final year in training dataframe
 PRED_YEAR <- EVAL_YEAR + 1          # Year to predict
-START_YEAR <- 2006                 # Earliest season to pull data. NOTE: Chosen to align with the start of ESPN QBR coverage
-SCORING_TYPE <- "HALF"  # Scoring type for fantasy points calculation, either "PPR", "HALF", or "STANDARD"
-PPR_MULT <- 0.5                  # PPR multiplier for receptions
+START_YEAR <- 2000                 # Earliest season to pull data. NOTE: Chosen to align with the start of ESPN QBR coverage
+# Scoring type for fantasy points calculation, one of the keys in SCORING_MULTS below
+SCORING_TYPE <- "HALF"
+
+# Per-reception multiplier keyed by scoring type, the single source of truth for PPR weighting
+SCORING_MULTS <- c(STANDARD = 0, HALF = 0.5, PPR = 1.0)
+
+# PPR multiplier for receptions, derived from SCORING_TYPE so the two never drift apart
+PPR_MULT <- SCORING_MULTS[[SCORING_TYPE]]

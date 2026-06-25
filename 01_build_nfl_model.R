@@ -14,7 +14,7 @@ SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data l
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
 RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
-# TODO: Test out the new "Tier 1" feature additions from Claude
+# DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
 # DONE: Test out prediction range pipeline myself
 # DONE: Find material to read more about prediction range OOB methodology
@@ -25,7 +25,7 @@ RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.
 # TODO: Check to see if there is a better open-source model available?
 # TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
-# TODO: Add in additional features to improve model performance
+# DONE: Add in additional features to improve model performance
 
 
 # Function to train the XGBoost model for a specific position
@@ -537,13 +537,16 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
 # === DATA IMPORT === #
 # Player data is sourced from the nflverse ecosystem via nflreadr, replacing the retired PFR scraper
 # See build_player_season_stats in functions.R for column mapping notes and substitution decisions
+# Building the output path with the year range baked into the filename
+stats_path <- sprintf("data/player_stats_final_%d_%d.csv", START_YEAR, EVAL_YEAR)
+
 if (SKIP_DATA_LOAD) {
   # Loading the prepared dataset directly from the data directory
-  player_stats_final <- fread("data/player_stats_final.csv")
+  player_stats_final <- fread(stats_path)
 } else {
   # Refreshing the full player season dataset from nflverse and caching it for future runs
   player_stats_final <- build_player_season_stats(START_YEAR, EVAL_YEAR)
-  fwrite(player_stats_final, "data/player_stats_final.csv")
+  fwrite(player_stats_final, stats_path)
 }
 
 #### Full dataset containing each player & statistical category
