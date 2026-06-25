@@ -20,7 +20,7 @@ invisible(lapply(required_packages, install_if_missing))
 
 EVAL_YEAR <- 2024                   # Final year in training dataframe
 PRED_YEAR <- EVAL_YEAR + 1          # Year to predict
-START_YEAR <- 2000                 # Earliest season to pull data. NOTE: Chosen to align with the start of ESPN QBR coverage
+START_YEAR <- 2020                 # Earliest season to pull data. NOTE: Chosen to align with the start of ESPN QBR coverage
 # Scoring type for fantasy points calculation, one of the keys in SCORING_MULTS below
 SCORING_TYPE <- "HALF"
 

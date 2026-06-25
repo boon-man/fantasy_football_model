@@ -26,6 +26,7 @@ RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.
 # TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
 # DONE: Add in additional features to improve model performance
+# TODO: Fix the annotations in plots to have adjustable x and y points so that they can be custom for qb/rb/wr
 
 
 # Function to train the XGBoost model for a specific position
@@ -445,7 +446,7 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   # Combine both
   full_df <- bind_rows(hist_df, preds)
 
-  # ier-aware player selection.
+  # Tier-aware player selection.
   # Bucket eval-year scorers into tiers by their most recent season, pick one tier at random,
   # then sample players within it. This gives a varied-but-readable set: everyone shares a
   # similar scoring band so the y-axis isn't distorted by mixing a star with a deep backup
@@ -493,8 +494,8 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
 
   ggplot(plot_df, aes(x = Year, y = points, color = Player, group = Player)) +
     # Solid historical trajectory, then a dashed leg into the prediction year
-    geom_line(data = hist_lines, linewidth = 0.8, alpha = 0.55) +
-    geom_line(data = pred_lines, linewidth = 0.8, alpha = 0.55, linetype = "dashed") +
+    geom_line(data = hist_lines, linewidth = 0.7, alpha = 0.7) +
+    geom_line(data = pred_lines, linewidth = 0.7, alpha = 0.7, linetype = "dashed") +
     geom_text_repel(
       data = label_df,
       aes(label = Player),
@@ -863,24 +864,27 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 9, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
-  mutate(diff = Predicted - Actual)
+  mutate(diff = Predicted - Actual) %>%
+  arrange(diff)
 
-rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 9, random_state = RANDOM_STATE)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 25) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
-  mutate(diff = Predicted - Actual)
+  mutate(diff = Predicted - Actual) %>%
+  arrange(diff)
 
 # IMPORTANT: TEs will be included in the WR model by default
-wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 9, random_state = RANDOM_STATE)
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 25) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
-  mutate(diff = Predicted - Actual)
+  mutate(diff = Predicted - Actual) %>%
+  arrange(diff)
 
 # Helper to report holdout performance for one position group,
 # comparing the untuned random forest baseline against the tuned XGBoost model

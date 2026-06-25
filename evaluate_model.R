@@ -81,11 +81,11 @@ plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15) {
       min.segment.length = 0, max.overlaps = Inf
     ) +
     annotate(
-      "text", x = 0.45 * max_x, y = 0.8 * max_y,
+      "text", x = 0.8 * max_x, y = 0.95 * max_y,
       label = "Overperformers", fontface = "bold", size = 4.5, alpha = 0.7
     ) +
     annotate(
-      "text", x = 0.85 * max_x, y = 0.05 * max_y,
+      "text", x = 0.95 * max_x, y = 0.15 * max_y,
       label = "Underperformers", fontface = "bold", size = 4.5, alpha = 0.7
     ) +
     labs(
