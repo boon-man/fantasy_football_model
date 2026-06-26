@@ -36,6 +36,8 @@ Not unit tests — these are one-off analysis/optimization scripts:
 - `validate_nflreadr_migration.R` — compares the nflverse dataset against legacy PFR CSVs
 - `model_proj_blend_analysis.R` — backtests blend weights against actual season results
 - `estimate_vorp_zscore_blend.R` — regression analysis behind the 2.25 VORP multiplier
+- `interval_coverage_backtest.R` — validates empirical coverage of the prediction intervals (consumes in-memory `*_intervals`/`*_pred_df` from `01`)
+- `feature_correlation_diagnostic.R` — read-only correlation report + clustered heatmap per position feature set (consumes in-memory `model_df` + `qb/rb/wr_features` from `01`); flags `findCorrelation` drop candidates but drops nothing
 - `positional_tiering.R`, `nfl_model_old.R` — older exploratory/legacy versions
 
 ## Domain Conventions

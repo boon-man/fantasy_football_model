@@ -20,14 +20,15 @@ RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.
 # DONE: Find material to read more about prediction range OOB methodology
 # DONE: Include metric to identify high-potential players
 # DONE: Random state added to train_position_model (RANDOM_STATE config knob) for alternate scenarios
-# TODO: Remove columns with high correlation?
+# DONE: Remove columns with high correlation?
 # DONE: Check to see if there are any other data sources to add in for additional model features
-# TODO: Check to see if there is a better open-source model available?
+# DONE: Check to see if there is a better open-source model available?
 # DONE: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
 # DONE: Add in additional features to improve model performance
-# TODO: Fix the annotations in plots to have adjustable x and y points so that they can be custom for qb/rb/wr
-# TODO: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
+# DONE: Fix the annotations in plots to have adjustable x and y points so that they can be custom for qb/rb/wr
+# DONE: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
+# TODO: Re-run the estimate_vorp_zscore_blend script for 2026
 # TODO: Create plot to visualize the breakouts of player tiers in 03_
 
 
@@ -921,13 +922,13 @@ plot_resid_hist(qb_model_preds, "QB")
 plot_decile_calib(qb_model_preds, "QB")
 
 # RB diagnostics
-plot_actual_vs_pred(rb_model_preds, "RB")
+plot_actual_vs_pred(rb_model_preds, "RB", overperf_x = 100)
 plot_resid_vs_pred(rb_model_preds, "RB")
 plot_resid_hist(rb_model_preds, "RB")
 plot_decile_calib(rb_model_preds, "RB")
 
 # WR/TE diagnostics
-plot_actual_vs_pred(wr_model_preds, "WR/TE")
+plot_actual_vs_pred(wr_model_preds, "WR/TE", overperf_x = 80)
 plot_resid_vs_pred(wr_model_preds, "WR/TE")
 plot_resid_hist(wr_model_preds, "WR/TE")
 plot_decile_calib(wr_model_preds, "WR/TE")

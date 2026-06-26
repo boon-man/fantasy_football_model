@@ -56,16 +56,31 @@ build_outlier_labels <- function(pred_df, top_n) {
 #' pred_df : data.frame with Player, Year, Actual, Predicted
 #' pos_label : character, position group name used in the plot title
 #' top_n : integer, number of largest absolute residuals to label (default 15)
+#' overperf_x, overperf_y : numeric, raw point coordinates for the "Overperformers"
+#'   label. Exposed because the ideal spot drifts a lot between position groups. When
+#'   left NULL they fall back to a data-relative default (0.80 * max predicted,
+#'   0.95 * max actual).
+#' underperf_x, underperf_y : numeric, raw point coordinates for the "Underperformers"
+#'   label; NULL falls back to (0.95 * max predicted, 0.15 * max actual).
 #'
 #' Returns a ggplot object. Points above the dashed line are players the model
 #' underpredicted (overperformers); points below were overpredicted.
-plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15) {
+plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15,
+                                overperf_x = NULL, overperf_y = NULL,
+                                underperf_x = NULL, underperf_y = NULL) {
   df <- add_prediction_diff(pred_df)
   outliers <- build_outlier_labels(df, top_n)
 
   # Dynamic placement for the region annotations
   max_x <- max(df$Predicted)
   max_y <- max(df$Actual)
+
+  # Use raw point coordinates when supplied, otherwise fall back to data-relative
+  # defaults so each position still lands a reasonable label spot
+  overperf_x  <- overperf_x  %||% (0.80 * max_x)
+  overperf_y  <- overperf_y  %||% (0.95 * max_y)
+  underperf_x <- underperf_x %||% (0.95 * max_x)
+  underperf_y <- underperf_y %||% (0.15 * max_y)
 
   ggplot(df, aes(x = Predicted, y = Actual)) +
     geom_point(alpha = 0.65, size = 1.4, color = NFL_COLOR_PALETTE[1]) +
@@ -81,11 +96,11 @@ plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15) {
       min.segment.length = 0, max.overlaps = Inf
     ) +
     annotate(
-      "text", x = 0.8 * max_x, y = 0.95 * max_y,
+      "text", x = overperf_x, y = overperf_y,
       label = "Overperformers", fontface = "bold", size = 4.5, alpha = 0.7
     ) +
     annotate(
-      "text", x = 0.95 * max_x, y = 0.15 * max_y,
+      "text", x = underperf_x, y = underperf_y,
       label = "Underperformers", fontface = "bold", size = 4.5, alpha = 0.7
     ) +
     labs(
