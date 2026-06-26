@@ -10,7 +10,7 @@ source("functions.R")   # Loading shared cleaning and nflverse data intake funct
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
-SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
+SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
 RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
@@ -41,12 +41,15 @@ RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.
 #   random_state: single seed threaded through the train/test split, baseline, tuning, and final
 #                 fit. Same value reproduces a run exactly; change it to generate alternate draft
 #                 scenarios so production isn't over-exposed to one model realization.
+#   log_every   : print a CV-RMSE progress line (current + best-so-far) every Nth tuning
+#                 evaluation, to watch how quickly performance stabilizes (default 5)
 train_position_model <- function(df, position, feature_cols,
                                  skip_tuning = SKIP_TUNING,
                                  init_points = 10,
                                  n_iter = 20,
                                  max_nrounds = 1000,
-                                 random_state = 62820) {
+                                 random_state = 62820,
+                                 log_every = 5) {
   # Filter to relevant position
   pos_df <- df %>%
     filter(
@@ -92,7 +95,7 @@ train_position_model <- function(df, position, feature_cols,
   baseline_preds <- predict(baseline_model, data = baseline_test)$predictions
   baseline_rmse <- sqrt(mean((baseline_preds - y_test)^2))
   baseline_mae <- mean(abs(baseline_preds - y_test))
-  cat("Baseline RF holdout RMSE for", position, "model:", round(baseline_rmse, 3), "\n")
+  cat("Baseline RMSE for", position, "model:", round(baseline_rmse, 3), "\n")
 
   # === TUNED MODEL === #
   # Tuned hyperparameters are cached per position so reruns can skip the optimization,
@@ -104,12 +107,19 @@ train_position_model <- function(df, position, feature_cols,
     best_params <- readRDS(params_path)
   } else {
 
+    # Counters for the periodic performance log, updated inside xgb_cv_bayes via <<-
+    eval_counter <- 0
+    best_rmse_so_far <- Inf
+
     # Define Bayesian optimization function
     # The tree count is not part of the search space, early stopping inside the
     # CV finds the right number of rounds for each candidate configuration
     xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree) {
       # Reset to random_state on every call so all candidates are scored on identical CV folds
       set.seed(random_state)
+
+      # Count this evaluation so the progress log can fire every log_every iterations
+      eval_counter <<- eval_counter + 1
 
       max_depth <- as.integer(round(max_depth))
 
@@ -153,8 +163,15 @@ train_position_model <- function(df, position, feature_cols,
         return(list(Score = -1e5, Pred = 0))
       }
 
-      # Reporting the evaluation metric by name rather than the generic Value label
-      cat("  CV RMSE:", round(best_rmse, 3), "\n")
+      # Track the running best and log progress every log_every evaluations so it is easy to
+      # see how quickly CV RMSE stabilizes during the search (current vs best-so-far).
+      # Use message() (stderr) not cat() (stdout): BayesianOptimization wraps each evaluation in
+      # utils::capture.output(), which redirects stdout and would otherwise swallow the log.
+      if (best_rmse < best_rmse_so_far) best_rmse_so_far <<- best_rmse
+      if (eval_counter %% log_every == 0) {
+        message(sprintf("  [%s] iter %3d | current RMSE: %.3f | best RMSE: %.3f",
+                        position, eval_counter, best_rmse, best_rmse_so_far))
+      }
 
       list(Score = -best_rmse, Pred = 0)
     }
@@ -867,7 +884,7 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 12, n_iter = 30, random_state = RANDOM_STATE)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
