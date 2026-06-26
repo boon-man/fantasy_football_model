@@ -4,11 +4,13 @@
 # Defining Variables, ensuring global variables are read in
 # 00_globals.R loads all package dependencies for the pipeline
 source("00_globals.R")
+source("evaluate_model.R")  # Loading the model performance diagnostic plots
 positions <- c("rb", "qb", "wr", "te")
 
-## I'm gonna favor my model a bit
-PRED_WEIGHT    <- 0.62   # Weight on my model's prediction
-PROJ_WEIGHT    <- 0.38   # Weight on FantasyPros projection
+## Per-position weight on my model's prediction vs the FantasyPros projection.
+## Keyed by Pos and looked up per row; the projection weight is the complement (1 - pred weight)
+## so the pair always sums to 1. QB and receivers lean on the model, RB leans on expert consensus.
+PRED_WEIGHTS <- c(QB = 0.50, RB = 0.40, WR = 0.60, TE = 0.60)
 PROJ_DAMP        <- 0.95  # Dampening factor for expert projections, they are pretty aggressive
 QB_PENALTY_FACTOR <- 0.85  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
@@ -47,96 +49,85 @@ clean_player_name <- function(name) {
     str_to_title()
 }
 
-# Plotting predicted player trajectories
-plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10, pred_year = as.Date("2025-01-01")) {
-  # Dynamically create prediction year as date
-  pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
-  eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
-  
-  # 1. Historical data
-  hist_df <- combined_df %>%
-    filter(Pos == pos_group) %>%
-    select(Player, Year, points)
-  
-  # 2. Predicted values with hardcoded prediction year
-  preds <- pred_df %>%
-    filter(Pos == pos_group) %>%
-    mutate(Year = pred_year, points = Final_Projection) %>%
-    select(Player, Year, points)
-  
-  # 3. Combine both
-  full_df <- bind_rows(hist_df, preds) %>%
-    group_by(Player) %>%
-    filter(n() > 1) %>%
-    ungroup()
-  
-  # 4. Filter players with > 50 pts in the most recent season
-  active_players <- hist_df %>%
-    filter(Year == eval_year, points > 50) %>%
-    distinct(Player) %>%
-    pull(Player)
-  
-  sampled_players <- sample(active_players, min(sample_n, length(active_players)))
-  
-  plot_df <- full_df %>%
-    filter(Player %in% sampled_players)
-  
-  # 5. Labels at final year (projection year)
-  label_df <- plot_df %>%
-    group_by(Player) %>%
-    slice_max(Year, n = 1, with_ties = FALSE) %>%
-    ungroup()
-  
-  # 6. Coastal Breeze palette (darker tint)
-  coastal_colors <- c(
-    "#2C5985",  # Dark steel blue
-    "#457C99",  # Dusty blue
-    "#639DB8",  # Muted sky blue
-    "#87BFD6",  # Cooler blue (formerly sky blue, darkened)
-    "#A0C5CF",  # Muted powder blue
-    "#507D76",  # Slate green-teal
-    "#7F91A6",  # Cool grayish-blue
-    "#476072"   # Dark coastal teal
-  )
-  pastel_colors <- rep(coastal_colors, length.out = length(unique(plot_df$Player)))
-  
-  ggplot(plot_df, aes(x = Year, y = points, color = Player, group = Player)) +
-    geom_line(linewidth = 0.9) +
-    geom_text_repel(
-      data = label_df,
-      aes(label = Player),
-      size = 4,
-      hjust = 0,
-      nudge_x = 0.05,
-      direction = "y",
-      segment.color = "#cccccc",
-      segment.size = 0.2,
-      family = "sans",
-      force = 1,
-      max.overlaps = Inf
+# Dumbbell chart comparing my model prediction against the FantasyPros projection for the
+# top_n players in a position group (ranked by the blended Final_Projection). Each player is a
+# row with two dots - model vs expert - joined by a connector, so the gap between the two reads
+# at a glance. Colors come from NFL_COLOR_PALETTE (defined in evaluate_model.R, present in the
+# session after 01 has been run).
+plot_pred_vs_proj_dumbbell <- function(projection_df, pos_group = "QB", top_n = 30) {
+  # Rank the position group by the blended projection and keep the top N players
+  ranked <-
+    projection_df %>%
+    filter(Pos == pos_group,
+           !is.na(Model_Prediction),
+           !is.na(FantasyPros_Prediction)) %>%
+    arrange(desc(Final_Projection)) %>%
+    slice_head(n = top_n) %>%
+    # Order the y-axis so the highest projected player sits at the top of the chart
+    mutate(Player = factor(Player, levels = rev(Player)))
+
+  # Long form drives the two colored dots, the wide ranked frame anchors the connector endpoints
+  points_long <-
+    ranked %>%
+    select(Player, Model = Model_Prediction, FantasyPros = FantasyPros_Prediction) %>%
+    pivot_longer(c(Model, FantasyPros), names_to = "Source", values_to = "Points") %>%
+    mutate(Source = factor(Source, levels = c("Model", "FantasyPros")))
+
+  ggplot() +
+    # Dashed horizontal separators every 10 players, counted from the top of the ranking.
+    # y is discrete (1..top_n, highest player on top), so minor gridlines won't render -
+    # we draw the lines explicitly at the .5 boundary between each block of 10.
+    geom_hline(
+      yintercept = top_n - seq(5, top_n - 1, by = 5) + 0.5,
+      linetype = "dashed", color = "#00000F", linewidth = 0.4, alpha = 0.4
     ) +
-    scale_x_date(expand = expansion(mult = c(0.01, 0.2))) +
-    coord_cartesian(clip = "off") +
-    scale_color_manual(values = pastel_colors) +
+    # Connector between the model and expert estimate for each player
+    geom_segment(
+      data = ranked,
+      aes(y = Player, yend = Player, x = Model_Prediction, xend = FantasyPros_Prediction),
+      color = "#C2C2C2", linewidth = 1
+    ) +
+    # The two estimate dots, colored by source
+    geom_point(
+      data = points_long,
+      aes(y = Player, x = Points, color = Source),
+      size = 3
+    ) +
+    # Black tick marking the blended Final_Projection that sits between the two estimates
+    geom_point(
+      data = ranked,
+      aes(y = Player, x = Final_Projection, shape = "Blended Projection"),
+      color = "#000000", size = 1
+    ) +
+    scale_color_manual(
+      values = c(Model = NFL_COLOR_PALETTE[1], FantasyPros = NFL_COLOR_PALETTE[3]),
+      breaks = c("Model", "FantasyPros"),
+      labels = c("Model Prediction", "FantasyPros Projection")
+    ) +
+    scale_shape_manual(values = c("Blended Projection" = 18)) +
+    # Major gridlines every 100 points, minor lines added at the 50-point marks between them
+    scale_x_continuous(breaks = seq(0, 1000, by = 100), minor_breaks = seq(0, 1000, by = 50)) +
     labs(
-      title = paste("Career Fantasy Point Trajectories +", format(pred_year, "%Y"), "Predictions"),
-      x = "Season",
-      y = "Fantasy Points"
+      title = paste0("Model vs FantasyPros — Top ", top_n, " ", pos_group, "s"),
+      x = "Projected Fantasy Points",
+      y = NULL,
+      color = NULL,
+      shape = NULL
     ) +
     theme_minimal(base_size = 13) +
     theme(
-      plot.title = element_text(colour = "#262626", size = 16, face = "bold", hjust = 0.5),
-      axis.title = element_text(colour = "#262626", size = 14),
-      axis.text = element_text(colour = "#262626", size = 12),
-      panel.background = element_rect(fill = "#ECDFCF", color = NA),
-      plot.background = element_rect(fill = "#ECDFCF", color = NA),
-      legend.position = "none",
-      panel.grid.minor = element_blank(),
-      panel.grid.major.x = element_blank(),
-      panel.grid.major.y = element_line(color = "#FFFFFF", linewidth = 0.3),
-      axis.line = element_line(color = "#FFFFFF", linewidth = 0.4) 
+      plot.title = element_text(colour = "#262626", size = 16, face = "bold"),
+      plot.subtitle = element_text(colour = "#595959", size = 11),
+      axis.text = element_text(colour = "#262626"),
+      legend.position = "top",
+      panel.grid.minor.y = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(color = "#E6E6E6", linewidth = 0.5),
+      # Thinner minor vertical gridlines at the 50-point marks between the majors
+      panel.grid.minor.x = element_line(color = "#EFEFEF", linewidth = 0.3)
     )
 }
+
 
 # Reading in player prediction dataframe
 player_df <- read_csv(paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
@@ -229,14 +220,17 @@ combined_projections <- combined_projections %>%
 
 
 ## Blending the combined projections into a final blended_projection step
-blended_df <- 
+blended_df <-
   combined_projections %>%
   mutate(
+    # Look up each player's model weight by position, projection weight is the complement
+    pred_w = PRED_WEIGHTS[Pos],
+    proj_w = 1 - pred_w,
     final_projection = case_when(
       !is.na(Predicted) & !is.na(Projected_Points) ~
-        PRED_WEIGHT * Predicted +
-        (PROJ_WEIGHT * Projected_Points * PROJ_DAMP),
-      
+        pred_w * Predicted +
+        (proj_w * Projected_Points * PROJ_DAMP),
+
       !is.na(Predicted) ~ Predicted,
       
       is.na(Predicted) & !is.na(Projected_Points) ~
@@ -259,10 +253,10 @@ final_df <-
   filter(!is.na(FantasyPros_Prediction)) # Removing players without a FantasyPros Projection, these players are out of the league or retired
 
 
-# Let's see if we cooked here
-plot_predicted_trajectories(combined, final_df, pos_group = "QB", sample_n = 8)
-plot_predicted_trajectories(combined, final_df, pos_group = "RB", sample_n = 8)
-plot_predicted_trajectories(combined, final_df, pos_group = "WR", sample_n = 8)
-plot_predicted_trajectories(combined, final_df, pos_group = "TE", sample_n = 8)
+# Let's see if we cooked here - model prediction vs FantasyPros projection per position
+plot_pred_vs_proj_dumbbell(final_df, pos_group = "QB", top_n = 30)
+plot_pred_vs_proj_dumbbell(final_df, pos_group = "RB", top_n = 30)
+plot_pred_vs_proj_dumbbell(final_df, pos_group = "WR", top_n = 30)
+plot_pred_vs_proj_dumbbell(final_df, pos_group = "TE", top_n = 30)
 
 fwrite(final_df, paste0("data/blended_proj_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))

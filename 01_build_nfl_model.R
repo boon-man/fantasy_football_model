@@ -23,10 +23,12 @@ RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.
 # TODO: Remove columns with high correlation?
 # DONE: Check to see if there are any other data sources to add in for additional model features
 # TODO: Check to see if there is a better open-source model available?
-# TODO: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
+# DONE: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
 # DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
 # DONE: Add in additional features to improve model performance
 # TODO: Fix the annotations in plots to have adjustable x and y points so that they can be custom for qb/rb/wr
+# TODO: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
+# TODO: Create plot to visualize the breakouts of player tiers in 03_
 
 
 # Function to train the XGBoost model for a specific position
@@ -864,14 +866,14 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 9, random_state = RANDOM_STATE)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 12, n_iter = 30, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual) %>%
   arrange(diff)
 
-rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 3, n_iter = 9, random_state = RANDOM_STATE)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 12, n_iter = 30, random_state = RANDOM_STATE)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 25) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
@@ -879,7 +881,7 @@ rb_model_preds <- rb_model[['predictions']] %>%
   arrange(diff)
 
 # IMPORTANT: TEs will be included in the WR model by default
-wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 3, n_iter = 9, random_state = RANDOM_STATE)
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 12, n_iter = 30, random_state = RANDOM_STATE)
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 25) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
