@@ -188,7 +188,8 @@ plot_resid_hist <- function(pred_df, pos_label = "", band = 50, binwidth = 10) {
 #' pos_label : character, position group name used in the plot title
 #' n_deciles : integer, number of quantile bins (default 10)
 #' nudge_y : numeric, vertical offset for the percentage labels (default 5 points)
-plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y = 5) {
+#' decile_cutoff: integer, minimum cutoff for decile plottting
+plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y = 5, decile_cutoff = 4) {
 
   # Binning into prediction deciles and averaging within each bin
   # Positive pct labels mean actuals ran above the model (underprediction)
@@ -202,7 +203,8 @@ plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y =
       .groups = "drop"
     ) |>
     mutate(pct_diff = (mean_actual - mean_pred) / mean_actual * 100) |>
-    mutate(diff_label = paste0(round(pct_diff, 1), "%"))
+    mutate(diff_label = paste0(round(pct_diff, 1), "%")) %>%
+    filter(pred_decile >= decile_cutoff)
 
   ggplot(decile_calib, aes(x = mean_pred, y = mean_actual)) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "lightgrey", alpha = 0.8) +

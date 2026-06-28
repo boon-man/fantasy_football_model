@@ -10,9 +10,9 @@ source("functions.R")   # Loading shared cleaning and nflverse data intake funct
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
-SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
+SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
-RANDOM_STATE <- 62820   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+RANDOM_STATE <- 628   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -47,7 +47,7 @@ train_position_model <- function(df, position, feature_cols,
                                  skip_tuning = SKIP_TUNING,
                                  init_points = 10,
                                  n_iter = 20,
-                                 max_nrounds = 1000,
+                                 max_nrounds = 2000,
                                  random_state = 62820,
                                  log_every = 5) {
   # Filter to relevant position
@@ -114,7 +114,7 @@ train_position_model <- function(df, position, feature_cols,
     # Define Bayesian optimization function
     # The tree count is not part of the search space, early stopping inside the
     # CV finds the right number of rounds for each candidate configuration
-    xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree) {
+    xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree, lambda, alpha) {
       # Reset to random_state on every call so all candidates are scored on identical CV folds
       set.seed(random_state)
 
@@ -124,7 +124,7 @@ train_position_model <- function(df, position, feature_cols,
       max_depth <- as.integer(round(max_depth))
 
       # Validate parameters
-      if (anyNA(c(max_depth, eta, gamma, min_child_weight, subsample))) {
+      if (anyNA(c(max_depth, eta, gamma, min_child_weight, subsample, lambda, alpha))) {
         return(list(Score = -1e5, Pred = 0))
       }
       if (max_depth <= 0 || !is.finite(eta) || !is.finite(gamma) || !is.finite(subsample)) {
@@ -148,6 +148,8 @@ train_position_model <- function(df, position, feature_cols,
           min_child_weight = min_child_weight,
           subsample = subsample,
           colsample_bytree = colsample_bytree,
+          lambda = lambda,
+          alpha = alpha,
           verbose = 0
         )
       }, error = function(e) NULL)
@@ -181,12 +183,14 @@ train_position_model <- function(df, position, feature_cols,
     opt_result <- BayesianOptimization(
       FUN = xgb_cv_bayes,
       bounds = list(
-        max_depth = c(3, 7),
-        eta = c(0.1, 0.3),
-        gamma = c(0, 0.1),
-        min_child_weight = c(0.05, 0.5),
-        subsample = c(0.9, 1.0),
-        colsample_bytree = c(0.7, 1.0)
+        max_depth = c(3, 8),
+        eta = c(0.02, 0.2),
+        gamma = c(0, 0.15),
+        min_child_weight = c(1, 12),
+        subsample = c(0.7, 1.0),
+        colsample_bytree = c(0.6, 0.95),
+        lambda = c(1, 10),    # L2 regularization
+        alpha = c(0, 3)       # L1 regularization
       ),
       init_points = init_points,
       n_iter = n_iter,
@@ -204,30 +208,58 @@ train_position_model <- function(df, position, feature_cols,
   }
 
   # Train final model with best parameters
-
-  dvalid <- xgb.DMatrix(data = data.matrix(X_test), label = y_test)
-  watchlist <- list(train = dtrain, eval = dvalid)
-
-  # The tree count is fixed high and early stopping against the holdout decides where to stop
-  final_model <- xgb.train(
+  #
+  # The tree count is chosen by CV on the TRAINING split only. The previous version early-stopped
+  # against the held-out test set and then scored on that same set, which let the model pick the
+  # iteration that minimized test error - optimistically biasing the tuned model's reported RMSE.
+  # The 80/20 split is unchanged (dtrain is the 80% training data); X_test now stays completely
+  # untouched until the single evaluation at the end, so the comparison to the baseline is honest.
+  set.seed(random_state)
+  cv_final <- xgb.cv(
     data = dtrain,
     nrounds = max_nrounds,
+    nfold = 3,
+    early_stopping_rounds = 50,
+    objective = "reg:squarederror",
+    eval_metric = "rmse",
+    tree_method = "hist",
+    seed = random_state,
     max_depth = round(best_params[["max_depth"]]),
     eta = best_params[["eta"]],
     gamma = best_params[["gamma"]],
     min_child_weight = best_params[["min_child_weight"]],
     subsample = best_params[["subsample"]],
     colsample_bytree = best_params[["colsample_bytree"]],
+    lambda = best_params[["lambda"]],
+    alpha = best_params[["alpha"]],
+    verbose = 0
+  )
+  # Read the best round straight from the CV log (which.min of mean test RMSE) rather than
+  # cv_final$best_iteration, which is NULL/absent in some xgboost versions and yields a
+  # length-zero nrounds. This matches the field the tuning loop already relies on.
+  best_nrounds <- which.min(cv_final$evaluation_log$test_rmse_mean)
+
+  # Fit on the full training split with the CV-chosen tree count - no watchlist, no early stopping,
+  # so the test set plays no role in selecting the model
+  final_model <- xgb.train(
+    data = dtrain,
+    nrounds = best_nrounds,
+    max_depth = round(best_params[["max_depth"]]),
+    eta = best_params[["eta"]],
+    gamma = best_params[["gamma"]],
+    min_child_weight = best_params[["min_child_weight"]],
+    subsample = best_params[["subsample"]],
+    colsample_bytree = best_params[["colsample_bytree"]],
+    lambda = best_params[["lambda"]],
+    alpha = best_params[["alpha"]],
     objective = "reg:squarederror",
     eval_metric = "rmse",
     tree_method = "hist",
     seed = random_state,
-    early_stopping_rounds = 25,
-    watchlist = watchlist,
     verbose = 0
   )
 
-  # Evaluate
+  # Evaluate once on the untouched held-out test split
   preds <- predict(final_model, newdata = data.matrix(X_test))
   rmse <- sqrt(mean((preds - y_test)^2))
   mae <- mean(abs(preds - y_test))
@@ -295,7 +327,8 @@ predict_next_year <- function(model_object, pred_df) {
     mutate(
       Predicted = predicted_points,
       Pred_Year = as.Date(paste0(as.numeric(format(Year, "%Y")) + 1, "-01-01"))
-    )
+    ) %>%
+    arrange(desc(Predicted))
 }
 
 # Function to generate simulated floor/ceiling prediction intervals via a player-level bootstrap
@@ -314,7 +347,7 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
                                            n_noise_draws = 50,
                                            random_state = 62820,
                                            min_oob_rows = 200,
-                                           max_nrounds = 1000,
+                                           max_nrounds = 2000,
                                            early_stopping_rounds = 50) {
   # Reuse the exact feature set and tuned hyperparameters from the trained point model
   feature_cols <- model_object$features
@@ -384,6 +417,8 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       min_child_weight = best_params[["min_child_weight"]],
       subsample = best_params[["subsample"]],
       colsample_bytree = best_params[["colsample_bytree"]],
+      lambda = best_params[["lambda"]],
+      alpha = best_params[["alpha"]],
       objective = "reg:squarederror",
       eval_metric = "rmse",
       tree_method = "hist",
@@ -447,7 +482,7 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
-plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 10, n_tiers = 2) {
+plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", sample_n = 8, tier = 1) {
   # Dynamically create prediction year as date
   pred_year <- as.Date(paste0(PRED_YEAR, "-01-01"))
   eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
@@ -466,24 +501,26 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   # Combine both
   full_df <- bind_rows(hist_df, preds)
 
-  # Tier-aware player selection.
-  # Bucket eval-year scorers into tiers by their most recent season, pick one tier at random,
-  # then sample players within it. This gives a varied-but-readable set: everyone shares a
-  # similar scoring band so the y-axis isn't distorted by mixing a star with a deep backup
-  # (e.g. prime Peyton Manning next to Dan Orlovsky).
-  eval_scores <- hist_df %>%
-    filter(Year == eval_year, points > 0) %>%
-    distinct(Player, points) %>%
-    mutate(tier = ntile(points, n_tiers))
+  # Tier = a contiguous slice of players ranked by predicted value, sample_n players per tier.
+  # tier 1 -> ranks 1..sample_n, tier 2 -> ranks (sample_n+1)..(2*sample_n), and so on. This keeps
+  # each plot to a similar-value band (the y-axis isn't distorted by mixing a star with a deep
+  # backup) and is deterministic, so a given tier always shows the same players.
+  ranked_players <- pred_df %>%
+    filter(Pos == pos_group) %>%
+    arrange(desc(Predicted)) %>%
+    mutate(rank = row_number())
 
-  # Index-based pick avoids sample()'s length-1 gotcha (sample(n, 1) would draw from 1:n)
-  available_tiers <- unique(eval_scores$tier)
-  chosen_tier <- available_tiers[sample(length(available_tiers), 1)]
+  start_rank <- (tier - 1) * sample_n + 1
+  end_rank <- tier * sample_n
 
-  tier_players <- eval_scores %>%
-    filter(tier == chosen_tier) %>%
+  sampled_players <- ranked_players %>%
+    filter(rank >= start_rank, rank <= end_rank) %>%
     pull(Player)
-  sampled_players <- sample(tier_players, min(sample_n, length(tier_players)))
+
+  if (length(sampled_players) == 0) {
+    stop(sprintf("No %s players in tier %d (ranks %d-%d); only %d ranked players available.",
+                 pos_group, tier, start_rank, end_rank, nrow(ranked_players)))
+  }
 
   plot_df <- full_df %>%
     filter(Player %in% sampled_players)
@@ -533,7 +570,8 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
     coord_cartesian(clip = "off") +
     scale_color_manual(values = pastel_colors) +
     labs(
-      title = paste("Career Fantasy Point Trajectories +", format(pred_year, "%Y"), "Predictions"),
+      title = paste0(pos_group, " Career Trajectories + ", format(pred_year, "%Y"),
+                     " Predictions (Tier ", tier, ": ranks ", start_rank, "-", end_rank, ")"),
       x = "Season",
       y = "Fantasy Points"
     ) +
@@ -552,6 +590,104 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
       # Dark "L" shaped axes along the left and bottom
       axis.line.x = element_line(color = "#4D4D4D", linewidth = 0.5),
       axis.line.y = element_line(color = "#4D4D4D", linewidth = 0.5)
+    )
+}
+
+# Slope (bump) chart of projected rank movement for a position: last season's positional rank
+# (by eval-year fantasy points) vs the model's predicted rank (by Predicted next-year points).
+# Each player is a line between the two rank columns - risers slope toward a better (lower) rank,
+# droppers toward a worse one. Players are tiered by predicted rank: tier 1 = the top
+# players_per_tier predicted, tier 2 = the next block, and so on. Only players ranked in both
+# seasons can move, so rookies (no last-season rank) and departures (no prediction) are excluded.
+# Names use repelling so labels stay legible even where outliers squish the axis.
+plot_rank_movement <- function(combined_df, pred_df, pos_group = "QB", tier = 1, players_per_tier = 20) {
+  eval_year <- as.Date(paste0(EVAL_YEAR, "-01-01"))
+
+  # Last season's positional rank from actual eval-year fantasy points (rank 1 = most points)
+  last_rank <- combined_df %>%
+    filter(Pos == pos_group, Year == eval_year, points > 0) %>%
+    distinct(Player, points) %>%
+    mutate(last_rank = dense_rank(desc(points))) %>%
+    select(Player, last_rank)
+
+  # Predicted positional rank from the model's next-year point forecast
+  pred_rank <- pred_df %>%
+    filter(Pos == pos_group) %>%
+    mutate(pred_rank = dense_rank(desc(Predicted))) %>%
+    select(Player, pred_rank)
+
+  # Keep only players ranked in both seasons, then score the move (positive = rose up the board)
+  movers <- inner_join(last_rank, pred_rank, by = "Player") %>%
+    mutate(
+      rank_change = last_rank - pred_rank,
+      direction = case_when(
+        rank_change > 0 ~ "Riser",
+        rank_change < 0 ~ "Dropoff",
+        TRUE ~ "Flat"
+      )
+    )
+
+  # Slice the requested tier: a contiguous block of players_per_tier players ordered by predicted rank
+  start_rank <- (tier - 1) * players_per_tier + 1
+  end_rank <- tier * players_per_tier
+  movers_sel <- movers %>%
+    filter(pred_rank >= start_rank, pred_rank <= end_rank)
+
+  if (nrow(movers_sel) == 0) {
+    stop(sprintf("No %s players in tier %d (predicted ranks %d-%d).",
+                 pos_group, tier, start_rank, end_rank))
+  }
+
+  # Long form: two rows per player (one per rank column) to draw the connecting slope line
+  slope_df <- movers_sel %>%
+    select(Player, direction, last_rank, pred_rank) %>%
+    pivot_longer(c(last_rank, pred_rank), names_to = "stage", values_to = "rank") %>%
+    mutate(x = if_else(stage == "last_rank", 1, 2))
+
+  ggplot(slope_df, aes(x = x, y = rank, group = Player, color = direction)) +
+    # Reference line under each rank column
+    geom_vline(xintercept = c(1, 2), color = "#D9D9D9", linewidth = 0.4) +
+    geom_line(linewidth = 0.45, alpha = 0.85) +
+    geom_point(size = 1.5) +
+    # Player + rank labels, repelled vertically within their column so squished outliers stay legible.
+    # direction = "y" keeps each label in its own column; nudge_x pushes it off the dots.
+    geom_text_repel(
+      data = filter(slope_df, x == 1),
+      aes(label = paste0(Player, " (", rank, ")")),
+      hjust = 1, nudge_x = -0.05, direction = "y",
+      size = 3.2, segment.color = "#cccccc", segment.size = 0.2,
+      min.segment.length = 0, box.padding = 0.2, max.overlaps = Inf, show.legend = FALSE
+    ) +
+    geom_text_repel(
+      data = filter(slope_df, x == 2),
+      aes(label = paste0("(", rank, ") ", Player)),
+      hjust = 0, nudge_x = 0.05, direction = "y",
+      size = 3.2, segment.color = "#cccccc", segment.size = 0.2,
+      min.segment.length = 0, box.padding = 0.2, max.overlaps = Inf, show.legend = FALSE
+    ) +
+    # Rank 1 sits at the top; ranks are read off the player labels rather than the y-axis
+    scale_y_reverse() +
+    scale_x_continuous(
+      breaks = c(1, 2), labels = c("Last Season", "Predicted"),
+      limits = c(0.4, 2.6)
+    ) +
+    scale_color_manual(
+      values = c(Riser = "#1F7A4D", Dropoff = "#9E2350", Flat = "#666666")
+    ) +
+    labs(
+      title = paste0(pos_group, " Projected Rank Movement — Last Season vs ", PRED_YEAR, " Prediction"),
+      subtitle = paste0("Tier ", tier, ": predicted ranks ", start_rank, "-", end_rank),
+      x = NULL, y = NULL, color = NULL
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(colour = "#262626", size = 15, face = "bold"),
+      plot.subtitle = element_text(colour = "#595959", size = 11),
+      axis.text.x = element_text(colour = "#262626", size = 12, face = "bold"),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      legend.position = "top",
+      panel.grid = element_blank()
     )
 }
 
@@ -679,6 +815,11 @@ combined <-
     # Adding metrics for QB efficiency stats
     rate_per_attempt = Rate / passing_att,
     td_int_ratio = if_else(passing_int > 0, passing_td / passing_int, NA_real_),
+    # Share of fantasy points coming from rushing - isolates the mobile/Konami-code QB archetype
+    # (the main driver of fantasy QB1 value), which is very sticky year over year
+    rush_pts_share = if_else(points > 0, (rush_yds * 0.1 + rush_td * 6) / points, 0),
+    # Pass attempts per game - a volume / every-week-starter proxy (QB fantasy is bimodal on playing time)
+    pass_att_per_game = if_else(G > 0, passing_att / G, 0),
     qb_yards = passing_yards + rush_yds,
     qb_yards_3yr = rollapplyr(qb_yards, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     avg_qbr_3yr = rollapplyr(QBR, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
@@ -818,7 +959,9 @@ qb_features <- c(
   "pos_rank", "pos_rank_last_year", "prior_injury_flag",
   "rate_per_attempt", "rush_1D", "rush_att", "rush_attempts_per_game",
   "rush_efficiency", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
+  "rush_pts_share", "avg_rushing_td_3yr",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
+  "pass_att_per_game",
   "sack_percent", "sack_yds", "seasons_played",
   "Team", "td_int_ratio", "top_finish_flag",
   "wins", "years_since_peak"
@@ -884,14 +1027,14 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 3, n_iter = 3, random_state = RANDOM_STATE)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual) %>%
   arrange(diff)
 
-rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 12, n_iter = 30, random_state = RANDOM_STATE)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 25) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
@@ -899,7 +1042,7 @@ rb_model_preds <- rb_model[['predictions']] %>%
   arrange(diff)
 
 # IMPORTANT: TEs will be included in the WR model by default
-wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 12, n_iter = 30, random_state = RANDOM_STATE)
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 25) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
@@ -933,9 +1076,9 @@ report_holdout_performance(wr_model, "WR/TE")
 
 # Rendering model diagnostics per position, run each plot as needed
 # QB diagnostics
-plot_actual_vs_pred(qb_model_preds, "QB")
+plot_actual_vs_pred(qb_model_preds, "QB", overperf_x = 125)
 plot_resid_vs_pred(qb_model_preds, "QB")
-plot_resid_hist(qb_model_preds, "QB")
+plot_resid_hist(qb_model_preds, "QB", band = 75)
 plot_decile_calib(qb_model_preds, "QB")
 
 # RB diagnostics
@@ -963,10 +1106,16 @@ wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "W
 intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
 
 # Visualizing predicted player performance trajectories
-plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", sample_n = 8)
-plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", sample_n = 8)
-plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", sample_n = 8)
-plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", sample_n = 8)
+plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", tier = 3)
+plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", tier = 3)
+plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", tier = 2)
+plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", tier = 1)
+
+# Visualizing projected rank movement vs last season, 20 players per tier by predicted rank
+plot_rank_movement(combined, qb_preds, pos_group = "QB", tier = 2)
+plot_rank_movement(combined, rb_preds, pos_group = "RB", tier = 2)
+plot_rank_movement(combined, wr_preds, pos_group = "WR", tier = 1)
+plot_rank_movement(combined, wr_preds, pos_group = "TE", tier = 2)
 
 # Saving out final combined dataframe. Joining the bootstrap floor/ceiling intervals on the unique
 # player_id (not name) so players who share a name + position - e.g. the two Adrian Petersons -
