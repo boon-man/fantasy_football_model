@@ -739,6 +739,23 @@ running_argmax <- function(x) {
   out
 }
 
+# Coefficient of variation (sd / mean) for a trailing window - used as a realized consistency
+# measure. Returns NA when the window has no spread to report (single value or zero mean) so the
+# downstream NA->0 cleanup can take over.
+coef_var <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  if (length(x) < 2 || is.na(m) || m == 0) return(NA_real_)
+  sd(x, na.rm = TRUE) / m
+}
+
+# OLS slope of a trailing window against its position index (1, 2, 3, ...). Captures multi-year
+# trajectory direction more stably than a single-year delta. NA until at least two points exist.
+trailing_slope <- function(x) {
+  if (length(x) < 2) return(NA_real_)
+  t <- seq_along(x)
+  cov(t, x) / var(t)
+}
+
 # Feature engineering
 combined <-
   combined %>%
@@ -779,6 +796,26 @@ combined <-
     adjusted_productivity = (points / age_sq),
     adjusted_productivity_trend = adjusted_productivity - lag(adjusted_productivity),
     adjusted_productivity_3yr = rollapplyr(adjusted_productivity, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+
+    # TD regression / "TD luck": touchdowns are noisier than yardage and regress year to year, so
+    # TDs per yard flags seasons whose scoring outran the underlying usage (a sell-high signal)
+    receiving_td_rate = if_else(receiving_yds > 0, receiving_td / receiving_yds, 0),
+    rushing_td_rate = if_else(rush_yds > 0, rush_td / rush_yds, 0),
+
+    # Role-trend momentum: a change in opportunity share tends to lead the change in production
+    target_share_delta = target_share - lag(target_share, 1),
+    wopr_trend = wopr - lag(wopr, 1),
+
+    # Realized consistency (backward-looking complement to the model's forward implied_upside):
+    # coefficient of variation of points over the trailing three seasons - low = steady/reliable
+    points_cv_3yr = rollapplyr(points, width = 3, FUN = coef_var, fill = NA, align = "right", partial = TRUE),
+
+    # Multi-year trajectory: OLS slope of points over the trailing three seasons, a steadier read
+    # of momentum than a single-year delta (climbing vs spiking vs fading)
+    points_trend_3yr = rollapplyr(points, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
+
+    # Youth x opportunity: young players already commanding volume are the classic breakout profile
+    youth_opportunity = if_else(Age > 0, wopr / Age, 0),
 
     # Creating a targets + games played feature, to show overall player involvement
     adjusted_targets = (Tgt * G),
@@ -955,11 +992,11 @@ qb_features <- c(
   "passing_net_yards_att", "passing_sack",
   "passing_td", "passing_td_pct", "passing_yards", "passing_yards_att", "passing_yards_att_3yr",
   "passing_yards_comp", "passing_yards_game", "points", "points_delta", "points_last_year",
-  "points_pct_change", "points_vs_3yr_avg",
+  "points_pct_change", "points_vs_3yr_avg", "points_cv_3yr", "points_trend_3yr",
   "pos_rank", "pos_rank_last_year", "prior_injury_flag",
   "rate_per_attempt", "rush_1D", "rush_att", "rush_attempts_per_game",
   "rush_efficiency", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
-  "rush_pts_share", "avg_rushing_td_3yr",
+  "rush_pts_share", "avg_rushing_td_3yr", "rushing_td_rate",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "pass_att_per_game",
   "sack_percent", "sack_yds", "seasons_played",
@@ -983,15 +1020,16 @@ rb_features <- c(
   "fbl_per_att", "games_last_year", "injured_last_year", "missing_pre_2006",
   "num_teams_prior", "num_missing_years",
   "points", "points_delta", "points_last_year", "points_per_target", "points_per_touch",
-  "points_pct_change", "points_vs_3yr_avg", "pos_rank", "pos_rank_last_year",
+  "points_pct_change", "points_vs_3yr_avg", "points_cv_3yr", "points_trend_3yr", "pos_rank", "pos_rank_last_year",
   "prior_injury_flag", "receiving_1D", "receiving_air_yards",
   "receiving_epa_per_target", "receiving_epa_per_target_3yr",
-  "receiving_rec_g", "receiving_td", "receiving_yds", "receiving_yds_rec",
+  "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr",
-  "target_share", "target_share_3yr", "wopr", "wopr_3yr",
+  "target_share", "target_share_3yr", "target_share_delta", "wopr", "wopr_3yr", "wopr_trend",
+  "youth_opportunity",
   "rush_1D", "rush_att", "rush_attempts_per_game", "rush_efficiency",
   "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
-  "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
+  "rush_td", "rushing_td_rate", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "targets_per_game", "targets_per_game_3yr",
   "Team", "top_finish_flag", "touches", "touches_last_year", "touches_3yr",
   "yards_from_scrimmage", "yards_from_scrimmage_3yr", "years_since_peak"
@@ -1012,13 +1050,14 @@ wr_features <- c(
   "games_last_year", "injured_last_year", "log_career_total_points",
   "missing_pre_2006", "num_teams_prior", "num_missing_years",
   "points", "points_delta", "points_last_year", "points_per_target",
-  "points_pct_change", "points_vs_3yr_avg", "prior_injury_flag",
+  "points_pct_change", "points_vs_3yr_avg", "points_cv_3yr", "points_trend_3yr", "prior_injury_flag",
   "pos_rank", "pos_rank_last_year", "receiving_1D", "receiving_air_yards",
   "receiving_epa_per_target", "receiving_epa_per_target_3yr",
-  "receiving_rec_g", "receiving_td", "receiving_yds", "receiving_yds_rec",
+  "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr",
-  "target_share", "target_share_3yr", "air_yards_share", "air_yards_share_3yr",
-  "wopr", "wopr_3yr", "racr", "racr_3yr",
+  "target_share", "target_share_3yr", "target_share_delta", "air_yards_share", "air_yards_share_3yr",
+  "wopr", "wopr_3yr", "wopr_trend", "racr", "racr_3yr",
+  "youth_opportunity",
   "rush_att", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "targets_per_game", "targets_per_game_3yr",
