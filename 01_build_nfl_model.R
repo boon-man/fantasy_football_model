@@ -10,9 +10,9 @@ source("functions.R")   # Loading shared cleaning and nflverse data intake funct
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
-SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
+SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
 SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
-RANDOM_STATE <- 628   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+RANDOM_STATE <- 42020   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -184,7 +184,7 @@ train_position_model <- function(df, position, feature_cols,
       FUN = xgb_cv_bayes,
       bounds = list(
         max_depth = c(3, 8),
-        eta = c(0.02, 0.2),
+        eta = c(0.015, 0.2),
         gamma = c(0, 0.15),
         min_child_weight = c(1, 12),
         subsample = c(0.7, 1.0),
@@ -908,6 +908,20 @@ combined <-
     # Flagging whether a player is playing above their 3-year average in the recent season (rising star vs fading)
     points_vs_3yr_avg = points - avg_points_3yr,
 
+    # Year-over-year volume/opportunity momentum. Rate deltas (per game) isolate a genuine role
+    # change from games missed, unlike the raw points_delta, and are among the stickiest
+    # breakout/regression signals. yards_from_scrimmage_delta is a strong RB/WR usage-swing predictor.
+    avg_points_per_game_delta = avg_points_per_game - lag(avg_points_per_game, 1),
+    touches_delta = touches - lag(touches, 1),
+    pass_att_per_game_delta = pass_att_per_game - lag(pass_att_per_game, 1),
+    yards_from_scrimmage_delta = yards_from_scrimmage - lag(yards_from_scrimmage, 1),
+
+    # Opportunity vs established baseline: current share minus its trailing 3yr average, the usage
+    # analog of points_vs_3yr_avg. A large positive gap flags an anomalous season that tends to
+    # mean-revert; a sustained gap confirms a real role change.
+    wopr_vs_3yr = wopr - wopr_3yr,
+    target_share_vs_3yr = target_share - target_share_3yr,
+
     # Injury / performance dip flags
     games_last_year = lag(G, 1),
     touches_last_year = lag(touches, 1),
@@ -917,9 +931,6 @@ combined <-
 
     # Did this player recover from injury last season?
     prior_injury_flag = lag(injured_last_year, 1),
-
-    # Draft capital serves as the talent pedigree signal in place of the retired award voting data
-    # TODO: explore pulling award voting data from an alternative source to restore the star score features
 
     # Logged major career statistics to normalize skewed distributions
     log_career_total_points = log1p(career_total_points)
@@ -993,6 +1004,7 @@ qb_features <- c(
   "passing_td", "passing_td_pct", "passing_yards", "passing_yards_att", "passing_yards_att_3yr",
   "passing_yards_comp", "passing_yards_game", "points", "points_delta", "points_last_year",
   "points_pct_change", "points_vs_3yr_avg", "points_cv_3yr", "points_trend_3yr",
+  "avg_points_per_game_delta", "pass_att_per_game_delta",
   "pos_rank", "pos_rank_last_year", "prior_injury_flag",
   "rate_per_attempt", "rush_1D", "rush_att", "rush_attempts_per_game",
   "rush_efficiency", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
@@ -1021,18 +1033,20 @@ rb_features <- c(
   "num_teams_prior", "num_missing_years",
   "points", "points_delta", "points_last_year", "points_per_target", "points_per_touch",
   "points_pct_change", "points_vs_3yr_avg", "points_cv_3yr", "points_trend_3yr", "pos_rank", "pos_rank_last_year",
+  "avg_points_per_game_delta",
   "prior_injury_flag", "receiving_1D", "receiving_air_yards",
   "receiving_epa_per_target", "receiving_epa_per_target_3yr",
   "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr",
-  "target_share", "target_share_3yr", "target_share_delta", "wopr", "wopr_3yr", "wopr_trend",
+  "target_share", "target_share_3yr", "target_share_delta", "target_share_vs_3yr",
+  "wopr", "wopr_3yr", "wopr_trend", "wopr_vs_3yr",
   "youth_opportunity",
   "rush_1D", "rush_att", "rush_attempts_per_game", "rush_efficiency",
   "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
   "rush_td", "rushing_td_rate", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "targets_per_game", "targets_per_game_3yr",
-  "Team", "top_finish_flag", "touches", "touches_last_year", "touches_3yr",
-  "yards_from_scrimmage", "yards_from_scrimmage_3yr", "years_since_peak"
+  "Team", "top_finish_flag", "touches", "touches_last_year", "touches_3yr", "touches_delta",
+  "yards_from_scrimmage", "yards_from_scrimmage_3yr", "yards_from_scrimmage_delta", "years_since_peak"
 )
 
 wr_features <- c(
@@ -1051,18 +1065,20 @@ wr_features <- c(
   "missing_pre_2006", "num_teams_prior", "num_missing_years",
   "points", "points_delta", "points_last_year", "points_per_target",
   "points_pct_change", "points_vs_3yr_avg", "points_cv_3yr", "points_trend_3yr", "prior_injury_flag",
+  "avg_points_per_game_delta",
   "pos_rank", "pos_rank_last_year", "receiving_1D", "receiving_air_yards",
   "receiving_epa_per_target", "receiving_epa_per_target_3yr",
   "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_yds", "receiving_yds_rec",
   "receiving_y_g", "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr",
-  "target_share", "target_share_3yr", "target_share_delta", "air_yards_share", "air_yards_share_3yr",
-  "wopr", "wopr_3yr", "wopr_trend", "racr", "racr_3yr",
+  "target_share", "target_share_3yr", "target_share_delta", "target_share_vs_3yr",
+  "air_yards_share", "air_yards_share_3yr",
+  "wopr", "wopr_3yr", "wopr_trend", "wopr_vs_3yr", "racr", "racr_3yr",
   "youth_opportunity",
   "rush_att", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "seasons_played", "targets_per_game", "targets_per_game_3yr",
   "Team", "top_finish_flag", "touches", "yards_from_scrimmage",
-  "yards_from_scrimmage_3yr", "years_since_peak"
+  "yards_from_scrimmage_3yr", "yards_from_scrimmage_delta", "years_since_peak"
 )
 
 # Creating models and making predictions for each major positional group
@@ -1117,7 +1133,7 @@ report_holdout_performance(wr_model, "WR/TE")
 # QB diagnostics
 plot_actual_vs_pred(qb_model_preds, "QB", overperf_x = 125)
 plot_resid_vs_pred(qb_model_preds, "QB")
-plot_resid_hist(qb_model_preds, "QB", band = 75)
+plot_resid_hist(qb_model_preds, "QB", binwidth = 10, band = 75)
 plot_decile_calib(qb_model_preds, "QB")
 
 # RB diagnostics
@@ -1129,7 +1145,7 @@ plot_decile_calib(rb_model_preds, "RB")
 # WR/TE diagnostics
 plot_actual_vs_pred(wr_model_preds, "WR/TE", overperf_x = 80)
 plot_resid_vs_pred(wr_model_preds, "WR/TE")
-plot_resid_hist(wr_model_preds, "WR/TE")
+plot_resid_hist(wr_model_preds, "WR/TE", binwidth = 5)
 plot_decile_calib(wr_model_preds, "WR/TE")
 
 # Making player predictions for the upcoming season
@@ -1146,15 +1162,15 @@ intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
 
 # Visualizing predicted player performance trajectories
 plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", tier = 3)
-plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", tier = 3)
-plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", tier = 2)
+plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", tier = 1)
+plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", tier = 1)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", tier = 1)
 
 # Visualizing projected rank movement vs last season, 20 players per tier by predicted rank
-plot_rank_movement(combined, qb_preds, pos_group = "QB", tier = 2)
-plot_rank_movement(combined, rb_preds, pos_group = "RB", tier = 2)
+plot_rank_movement(combined, qb_preds, pos_group = "QB", tier = 1)
+plot_rank_movement(combined, rb_preds, pos_group = "RB", tier = 1)
 plot_rank_movement(combined, wr_preds, pos_group = "WR", tier = 1)
-plot_rank_movement(combined, wr_preds, pos_group = "TE", tier = 2)
+plot_rank_movement(combined, wr_preds, pos_group = "TE", tier = 1)
 
 # Saving out final combined dataframe. Joining the bootstrap floor/ceiling intervals on the unique
 # player_id (not name) so players who share a name + position - e.g. the two Adrian Petersons -
