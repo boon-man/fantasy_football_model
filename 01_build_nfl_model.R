@@ -29,6 +29,7 @@ RANDOM_STATE <- 742026   # Seed threaded into train_position_model; change it (e
 # DONE: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
 # TODO: Re-run the estimate_vorp_zscore_blend script for 2026
 # TODO: Create plot to visualize the breakouts of player tiers in 03_
+# TODO: Adjust color palette in career trajectories so that it is directly gradient from best-worst
 
 
 # Function to train the XGBoost model for a specific position
@@ -458,11 +459,11 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     stringsAsFactors = FALSE
   ) %>%
     mutate(
-      Floor = pred_p10,                  # Floor and Ceiling default to the 80% interval
-      Ceiling = pred_p90,
-      pred_width = pred_p90 - pred_p10,
-      pred_upside = pred_p90 - pred_mean,    # ceiling distance above the mean (reported as-is)
-      pred_downside = pred_mean - pred_p10,  # floor distance below the mean (reported as-is)
+      Floor = pred_p05,                  # Floor and Ceiling default to the 80% interval
+      Ceiling = pred_p95,
+      pred_width = pred_p95 - pred_p05,
+      pred_upside = pred_p95 - pred_mean,    # ceiling distance above the mean (reported as-is)
+      pred_downside = pred_mean - pred_p05,  # floor distance below the mean (reported as-is)
       # Raw asymmetry ratio: upside earned per unit of downside risk. Intermediate only - it is
       # standardized into upside_index below, then dropped. Two choices keep it from being
       # mechanically tied to a player's predicted level:
@@ -472,7 +473,7 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       #        prediction) applied to BOTH sides — a mean-scaled, denominator-only floor would drag
       #        the ratio down for high scorers purely as an artifact.
       eps = 0.02 * median(pred_mean),
-      upside_ratio = (pred_p90 - pred_p50 + eps) / (pred_p50 - pred_p10 + eps)
+      upside_ratio = (pred_p95 - pred_p50 + eps) / (pred_p50 - pred_p05 + eps)
     ) %>%
     # Cross-position upside index (the carried tie-breaker): standardize the raw ratio within this
     # position group to a mean of 100 and sd of 15 (IQ/wRC+-style). 100 = average upside for the
@@ -485,7 +486,16 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
         mu <- mean(upside_ratio, na.rm = TRUE)
         sigma <- sd(upside_ratio, na.rm = TRUE)
         if (is.na(sigma) || sigma == 0) 100 else 100 + 15 * (upside_ratio - mu) / sigma
-      }
+      },
+      # Disentangle WHY a player grades as upside - raw ceiling vs. contained downside - by expressing
+      # each band edge as a multiple of the model's own central estimate (pred_mean). Both are already
+      # scale-free ratios, so they compare directly across players and positions without standardizing.
+      #   ceiling_room (Ceiling / pred_mean, > 1): how far the p90 ceiling reaches above the projection
+      #     - a large value flags upside driven by a high ceiling (boom potential).
+      #   floor_share  (Floor / pred_mean, < 1): how much of the projection the p10 floor retains
+      #     - a value near 1 flags upside driven by a high floor / safety (low bust risk).
+      ceiling_room = if_else(pred_mean > 0, Ceiling / pred_mean, NA_real_),
+      floor_share  = if_else(pred_mean > 0, Floor / pred_mean, NA_real_)
     ) %>%
     select(-eps, -upside_ratio)
 }
@@ -1177,7 +1187,7 @@ final <-
     intervals_all %>%
       select(player_id, Floor, Ceiling, pred_mean,
              pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width,
-             pred_upside, pred_downside, upside_index),
+             pred_downside, pred_upside, ceiling_room, floor_share, upside_index),
     by = "player_id"
   )
 
