@@ -11,7 +11,7 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 42020   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+RANDOM_STATE <- 742026   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -178,7 +178,7 @@ train_position_model <- function(df, position, feature_cols,
     FUN = xgb_cv_bayes,
     bounds = list(
       max_depth = c(3, 8),
-      eta = c(0.015, 0.2),
+      eta = c(0.01, 0.2),
       gamma = c(0, 0.15),
       min_child_weight = c(1, 12),
       subsample = c(0.7, 1.0),
@@ -463,19 +463,31 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       pred_width = pred_p90 - pred_p10,
       pred_upside = pred_p90 - pred_mean,    # ceiling distance above the mean (reported as-is)
       pred_downside = pred_mean - pred_p10,  # floor distance below the mean (reported as-is)
-      # Asymmetry score (within-tier tie-breaker): upside earned per unit of downside risk.
-      # Two deliberate choices keep it from being mechanically tied to a player's predicted level:
+      # Raw asymmetry ratio: upside earned per unit of downside risk. Intermediate only - it is
+      # standardized into upside_index below, then dropped. Two choices keep it from being
+      # mechanically tied to a player's predicted level:
       #   (#1) pivot on the MEDIAN, not the mean — the bootstrap distribution is right-skewed, so a
       #        mean pivot systematically inflates the downside and deflates the upside.
       #   (#2) stabilize with a single per-position constant eps (2% of the position's median
-      #        prediction) applied to BOTH sides — the old 0.02*pred_mean floor scaled with the
-      #        player's own mean and sat only in the denominator, dragging the ratio down for high
-      #        scorers purely as an artifact.
-      # High values flag high-ceiling / contained-floor breakout candidates.
+      #        prediction) applied to BOTH sides — a mean-scaled, denominator-only floor would drag
+      #        the ratio down for high scorers purely as an artifact.
       eps = 0.02 * median(pred_mean),
-      implied_upside = (pred_p90 - pred_p50 + eps) / (pred_p50 - pred_p10 + eps)
+      upside_ratio = (pred_p90 - pred_p50 + eps) / (pred_p50 - pred_p10 + eps)
     ) %>%
-    select(-eps)
+    # Cross-position upside index (the carried tie-breaker): standardize the raw ratio within this
+    # position group to a mean of 100 and sd of 15 (IQ/wRC+-style). 100 = average upside for the
+    # position, <100 below, >100 above, so a value is directly comparable across QB/RB/WR (equal
+    # spread => equal rarity). It is a linear rescale, so the within-position ranking (and thus the
+    # tie-breaker ordering) is identical to the raw ratio. generate_prediction_intervals is called
+    # once per position, so mean/sd here center on the correct group.
+    mutate(
+      upside_index = {
+        mu <- mean(upside_ratio, na.rm = TRUE)
+        sigma <- sd(upside_ratio, na.rm = TRUE)
+        if (is.na(sigma) || sigma == 0) 100 else 100 + 15 * (upside_ratio - mu) / sigma
+      }
+    ) %>%
+    select(-eps, -upside_ratio)
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
@@ -803,7 +815,7 @@ combined <-
     target_share_delta = target_share - lag(target_share, 1),
     wopr_trend = wopr - lag(wopr, 1),
 
-    # Realized consistency (backward-looking complement to the model's forward implied_upside):
+    # Realized consistency (backward-looking complement to the model's forward upside_index):
     # coefficient of variation of points over the trailing three seasons - low = steady/reliable
     points_cv_3yr = rollapplyr(points, width = 3, FUN = coef_var, fill = NA, align = "right", partial = TRUE),
 
@@ -1064,14 +1076,14 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 10, n_iter = 38, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual) %>%
   arrange(diff)
 
-rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 10, n_iter = 38, random_state = RANDOM_STATE)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 25) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
@@ -1079,7 +1091,7 @@ rb_model_preds <- rb_model[['predictions']] %>%
   arrange(diff)
 
 # IMPORTANT: TEs will be included in the WR model by default
-wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 10, n_iter = 38, random_state = RANDOM_STATE)
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 25) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
@@ -1143,7 +1155,7 @@ wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "W
 intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
 
 # Visualizing predicted player performance trajectories
-plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", tier = 3)
+plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", tier = 1)
 plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", tier = 1)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", tier = 1)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", tier = 1)
@@ -1165,7 +1177,7 @@ final <-
     intervals_all %>%
       select(player_id, Floor, Ceiling, pred_mean,
              pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width,
-             pred_upside, pred_downside, implied_upside),
+             pred_upside, pred_downside, upside_index),
     by = "player_id"
   )
 

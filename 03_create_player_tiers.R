@@ -185,7 +185,7 @@ total_df$Tier <- kmeans_attrs$cluster
 tier_df <-
   total_df %>%
   select(player_id, Player, Pos, Model_Prediction, FantasyPros_Prediction, Final_Projection,
-         Floor, Ceiling, implied_upside,   # model's own range/upside, carried to the final sheet
+         Floor, Ceiling, upside_index,   # model's own range/upside, carried to the final sheet
          FP_Pos_Ranking, Pos_Ranking, Overall_Ranking, Relative_Value, Tier) %>%
   group_by(Tier) %>%
   mutate(tier_avg = mean(Relative_Value)) %>%
@@ -221,7 +221,7 @@ te_df <- assign_positional_tiers(tier_df, pos = "TE", k = 6)
 final_df <- bind_rows(list(qb_df, rb_df, wr_df, te_df)) %>%
   arrange(desc(Relative_Value), Tier, Pos_Tier) %>%
   select(player_id, Player, Pos, Model_Prediction, FantasyPros_Prediction,
-         Final_Projection, Floor, Ceiling, implied_upside,
+         Final_Projection, Floor, Ceiling, upside_index,
          FP_Pos_Ranking, Pos_Ranking, Overall_Ranking,
          Relative_Value, Tier, Pos_Tier)
 
