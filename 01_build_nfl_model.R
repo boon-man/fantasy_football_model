@@ -471,14 +471,21 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       Floor = pred_p10,                  # Floor and Ceiling default to the 80% interval
       Ceiling = pred_p90,
       pred_width = pred_p90 - pred_p10,
-      pred_upside = pred_p90 - pred_mean,    # ceiling distance above the mean
-      pred_downside = pred_mean - pred_p10,  # floor distance below the mean
-      # Asymmetry score: upside earned per unit of downside risk. A small floor
-      # (2% of the absolute mean, minimum 0.02) keeps the ratio stable when downside
-      # is near zero. High values flag high-ceiling / contained-floor breakout candidates.
-      downside_floor = 0.02 * pmax(abs(pred_mean), 1.0),
-      implied_upside = pred_upside / (pred_downside + downside_floor)
-    )
+      pred_upside = pred_p90 - pred_mean,    # ceiling distance above the mean (reported as-is)
+      pred_downside = pred_mean - pred_p10,  # floor distance below the mean (reported as-is)
+      # Asymmetry score (within-tier tie-breaker): upside earned per unit of downside risk.
+      # Two deliberate choices keep it from being mechanically tied to a player's predicted level:
+      #   (#2) pivot on the MEDIAN, not the mean — the bootstrap distribution is right-skewed, so a
+      #        mean pivot systematically inflates the downside and deflates the upside.
+      #   (#1) stabilize with a single per-position constant eps (2% of the position's median
+      #        prediction) applied to BOTH sides — the old 0.02*pred_mean floor scaled with the
+      #        player's own mean and sat only in the denominator, dragging the ratio down for high
+      #        scorers purely as an artifact.
+      # High values flag high-ceiling / contained-floor breakout candidates.
+      eps = 0.02 * median(pred_mean),
+      implied_upside = (pred_p90 - pred_p50 + eps) / (pred_p50 - pred_p10 + eps)
+    ) %>%
+    select(-eps)
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
