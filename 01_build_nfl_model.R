@@ -11,7 +11,6 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-SKIP_TUNING <- FALSE    # Set to TRUE to reuse cached hyperparameters and skip Bayesian optimization
 RANDOM_STATE <- 42020   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
@@ -44,7 +43,6 @@ RANDOM_STATE <- 42020   # Seed threaded into train_position_model; change it (e.
 #   log_every   : print a CV-RMSE progress line (current + best-so-far) every Nth tuning
 #                 evaluation, to watch how quickly performance stabilizes (default 5)
 train_position_model <- function(df, position, feature_cols,
-                                 skip_tuning = SKIP_TUNING,
                                  init_points = 10,
                                  n_iter = 20,
                                  max_nrounds = 2000,
@@ -98,114 +96,106 @@ train_position_model <- function(df, position, feature_cols,
   cat("Baseline RMSE for", position, "model:", round(baseline_rmse, 3), "\n")
 
   # === TUNED MODEL === #
-  # Tuned hyperparameters are cached per position so reruns can skip the optimization,
-  # mirroring the SKIP_DATA_LOAD pattern, retune once per annual refresh
-  params_path <- paste0("data/tuned_params_", position, "_", SCORING_TYPE, ".rds")
+  # Bayesian optimization runs fresh on every call by design: the model is run sparingly, each
+  # time with a new RANDOM_STATE, to generate a wholly fresh model realization and a systematically
+  # different draft board (controlled variance in which players grade out as premier selections,
+  # so the same names don't repeatedly top the board). There is no hyperparameter cache to skip.
 
-  if (skip_tuning && file.exists(params_path)) {
-    cat("Loading cached hyperparameters from", params_path, "\n")
-    best_params <- readRDS(params_path)
-  } else {
+  # Counters for the periodic performance log, updated inside xgb_cv_bayes via <<-
+  eval_counter <- 0
+  best_rmse_so_far <- Inf
 
-    # Counters for the periodic performance log, updated inside xgb_cv_bayes via <<-
-    eval_counter <- 0
-    best_rmse_so_far <- Inf
+  # Define Bayesian optimization function
+  # The tree count is not part of the search space, early stopping inside the
+  # CV finds the right number of rounds for each candidate configuration
+  xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree, lambda, alpha) {
+    # Reset to random_state on every call so all candidates are scored on identical CV folds
+    set.seed(random_state)
 
-    # Define Bayesian optimization function
-    # The tree count is not part of the search space, early stopping inside the
-    # CV finds the right number of rounds for each candidate configuration
-    xgb_cv_bayes <- function(max_depth, eta, gamma, min_child_weight, subsample, colsample_bytree, lambda, alpha) {
-      # Reset to random_state on every call so all candidates are scored on identical CV folds
-      set.seed(random_state)
+    # Count this evaluation so the progress log can fire every log_every iterations
+    eval_counter <<- eval_counter + 1
 
-      # Count this evaluation so the progress log can fire every log_every iterations
-      eval_counter <<- eval_counter + 1
+    max_depth <- as.integer(round(max_depth))
 
-      max_depth <- as.integer(round(max_depth))
-
-      # Validate parameters
-      if (anyNA(c(max_depth, eta, gamma, min_child_weight, subsample, lambda, alpha))) {
-        return(list(Score = -1e5, Pred = 0))
-      }
-      if (max_depth <= 0 || !is.finite(eta) || !is.finite(gamma) || !is.finite(subsample)) {
-        return(list(Score = -1e5, Pred = 0))
-      }
-
-      # Run CV, three folds are sufficient to rank candidate configurations
-      cv <- tryCatch({
-        xgb.cv(
-          data = dtrain,
-          nrounds = max_nrounds,
-          nfold = 3,
-          early_stopping_rounds = 50,
-          objective = "reg:squarederror",
-          eval_metric = "rmse",
-          tree_method = "hist",
-          seed = random_state,
-          max_depth = max_depth,
-          eta = eta,
-          gamma = gamma,
-          min_child_weight = min_child_weight,
-          subsample = subsample,
-          colsample_bytree = colsample_bytree,
-          lambda = lambda,
-          alpha = alpha,
-          verbose = 0
-        )
-      }, error = function(e) NULL)
-
-      # Handle failed CVs
-      if (is.null(cv) || is.null(cv$evaluation_log)) {
-        return(list(Score = -1e5, Pred = 0))
-      }
-
-      best_rmse <- min(cv$evaluation_log$test_rmse_mean, na.rm = TRUE)
-
-      if (!is.finite(best_rmse)) {
-        return(list(Score = -1e5, Pred = 0))
-      }
-
-      # Track the running best and log progress every log_every evaluations so it is easy to
-      # see how quickly CV RMSE stabilizes during the search (current vs best-so-far).
-      # Use message() (stderr) not cat() (stdout): BayesianOptimization wraps each evaluation in
-      # utils::capture.output(), which redirects stdout and would otherwise swallow the log.
-      if (best_rmse < best_rmse_so_far) best_rmse_so_far <<- best_rmse
-      if (eval_counter %% log_every == 0) {
-        message(sprintf("  [%s] iter %3d | current RMSE: %.3f | best RMSE: %.3f",
-                        position, eval_counter, best_rmse, best_rmse_so_far))
-      }
-
-      list(Score = -best_rmse, Pred = 0)
+    # Validate parameters
+    if (anyNA(c(max_depth, eta, gamma, min_child_weight, subsample, lambda, alpha))) {
+      return(list(Score = -1e5, Pred = 0))
+    }
+    if (max_depth <= 0 || !is.finite(eta) || !is.finite(gamma) || !is.finite(subsample)) {
+      return(list(Score = -1e5, Pred = 0))
     }
 
-    # Run Bayesian Optimization, seeding so the random initial configurations are reproducible per random_state
-    set.seed(random_state)
-    opt_result <- BayesianOptimization(
-      FUN = xgb_cv_bayes,
-      bounds = list(
-        max_depth = c(3, 8),
-        eta = c(0.015, 0.2),
-        gamma = c(0, 0.15),
-        min_child_weight = c(1, 12),
-        subsample = c(0.7, 1.0),
-        colsample_bytree = c(0.6, 0.95),
-        lambda = c(1, 10),    # L2 regularization
-        alpha = c(0, 3)       # L1 regularization
-      ),
-      init_points = init_points,
-      n_iter = n_iter,
-      acq = "ucb",          # Or ei depending on strategy
-      kappa = 1.75,
-      eps = 0.4,
-      verbose = FALSE       # Per evaluation RMSE is printed inside the CV function instead
-    )
+    # Run CV, three folds are sufficient to rank candidate configurations
+    cv <- tryCatch({
+      xgb.cv(
+        data = dtrain,
+        nrounds = max_nrounds,
+        nfold = 3,
+        early_stopping_rounds = 50,
+        objective = "reg:squarederror",
+        eval_metric = "rmse",
+        tree_method = "hist",
+        seed = random_state,
+        max_depth = max_depth,
+        eta = eta,
+        gamma = gamma,
+        min_child_weight = min_child_weight,
+        subsample = subsample,
+        colsample_bytree = colsample_bytree,
+        lambda = lambda,
+        alpha = alpha,
+        verbose = 0
+      )
+    }, error = function(e) NULL)
 
-    best_params <- opt_result$Best_Par
-    cat("Best CV RMSE for", position, "model:", round(-opt_result$Best_Value, 3), "\n")
+    # Handle failed CVs
+    if (is.null(cv) || is.null(cv$evaluation_log)) {
+      return(list(Score = -1e5, Pred = 0))
+    }
 
-    # Caching the winning hyperparameters for future runs
-    saveRDS(best_params, params_path)
+    best_rmse <- min(cv$evaluation_log$test_rmse_mean, na.rm = TRUE)
+
+    if (!is.finite(best_rmse)) {
+      return(list(Score = -1e5, Pred = 0))
+    }
+
+    # Track the running best and log progress every log_every evaluations so it is easy to
+    # see how quickly CV RMSE stabilizes during the search (current vs best-so-far).
+    # Use message() (stderr) not cat() (stdout): BayesianOptimization wraps each evaluation in
+    # utils::capture.output(), which redirects stdout and would otherwise swallow the log.
+    if (best_rmse < best_rmse_so_far) best_rmse_so_far <<- best_rmse
+    if (eval_counter %% log_every == 0) {
+      message(sprintf("  [%s] iter %3d | current RMSE: %.3f | best RMSE: %.3f",
+                      position, eval_counter, best_rmse, best_rmse_so_far))
+    }
+
+    list(Score = -best_rmse, Pred = 0)
   }
+
+  # Run Bayesian Optimization, seeding so the random initial configurations are reproducible per random_state
+  set.seed(random_state)
+  opt_result <- BayesianOptimization(
+    FUN = xgb_cv_bayes,
+    bounds = list(
+      max_depth = c(3, 8),
+      eta = c(0.015, 0.2),
+      gamma = c(0, 0.15),
+      min_child_weight = c(1, 12),
+      subsample = c(0.7, 1.0),
+      colsample_bytree = c(0.6, 0.95),
+      lambda = c(1, 10),    # L2 regularization
+      alpha = c(0, 3)       # L1 regularization
+    ),
+    init_points = init_points,
+    n_iter = n_iter,
+    acq = "ucb",          # Or ei depending on strategy
+    kappa = 1.75,
+    eps = 0.4,
+    verbose = FALSE       # Per evaluation RMSE is printed inside the CV function instead
+  )
+
+  best_params <- opt_result$Best_Par
+  cat("Best CV RMSE for", position, "model:", round(-opt_result$Best_Value, 3), "\n")
 
   # Train final model with best parameters
   #
@@ -475,9 +465,9 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       pred_downside = pred_mean - pred_p10,  # floor distance below the mean (reported as-is)
       # Asymmetry score (within-tier tie-breaker): upside earned per unit of downside risk.
       # Two deliberate choices keep it from being mechanically tied to a player's predicted level:
-      #   (#2) pivot on the MEDIAN, not the mean — the bootstrap distribution is right-skewed, so a
+      #   (#1) pivot on the MEDIAN, not the mean — the bootstrap distribution is right-skewed, so a
       #        mean pivot systematically inflates the downside and deflates the upside.
-      #   (#1) stabilize with a single per-position constant eps (2% of the position's median
+      #   (#2) stabilize with a single per-position constant eps (2% of the position's median
       #        prediction) applied to BOTH sides — the old 0.02*pred_mean floor scaled with the
       #        player's own mean and sat only in the denominator, dragging the ratio down for high
       #        scorers purely as an artifact.
