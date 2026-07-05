@@ -29,7 +29,7 @@ RANDOM_STATE <- 742026   # Seed threaded into train_position_model; change it (e
 # DONE: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
 # TODO: Re-run the estimate_vorp_zscore_blend script for 2026
 # TODO: Create plot to visualize the breakouts of player tiers in 03_
-# TODO: Adjust color palette in career trajectories so that it is directly gradient from best-worst
+# DONE: Adjust color palette in career trajectories so that it is directly gradient from best-worst
 
 
 # Function to train the XGBoost model for a specific position
@@ -258,6 +258,7 @@ train_position_model <- function(df, position, feature_cols,
   list(
     model = final_model,
     features = feature_cols,
+    best_nrounds = best_nrounds,   # CV-chosen tree count, reused by generate_prediction_intervals
     rmse = rmse,
     mae = mae,
     baseline_rmse = baseline_rmse,
@@ -324,25 +325,27 @@ predict_next_year <- function(model_object, pred_df) {
 
 # Function to generate simulated floor/ceiling prediction intervals via a player-level bootstrap
 #
-# Reuses a trained model's tuned hyperparameters and pruned feature set, so no re-tuning happens.
-# Each iteration draws players WITH replacement and replicates every drawn player's rows by how
-# many times the player was sampled, giving a true cluster bootstrap. Players never drawn form the
-# out-of-bag (OOB) set, used both for early stopping and for de-biased residual noise that widens
-# the intervals. Predictions are aggregated across bootstraps into per-player percentiles.
-#
-# Each fitted model contributes n_noise_draws residual-perturbed prediction samples rather than
-# one, so the total Monte Carlo sample per player is n_bootstrap * n_noise_draws. This decouples
-# the sample size from the (expensive) model count, stabilizing the tail percentiles cheaply.
+# Reuses a trained model's tuned hyperparameters, pruned feature set, and tree count, so no
+# re-tuning happens. Each of n_bootstrap iterations draws players WITH replacement and replicates
+# every drawn player's rows by its draw count (a true cluster bootstrap), fits at a FIXED nrounds
+# (no early stopping), and predicts on the eval players - the spread of these refit predictions is
+# the epistemic (model) uncertainty. Out-of-bag (fitted, residual) pairs from every iteration
+# accumulate into ONE global pool, binned by fitted value so the aleatoric noise a player receives
+# is sized to his own projection level (heteroscedastic). The predictive sample per player is
+#   Predicted + epistemic deviation (refit spread, re-centered on Predicted) + binned OOB noise,
+# giving n_bootstrap * n_noise_draws Monte Carlo draws each. Bands are centered on the SAME
+# full-data model prediction carried downstream as `Predicted`, not the bootstrap ensemble mean.
+# n_bootstrap is kept modest (30) so the tails retain a little run-to-run variety - a fresh
+# RANDOM_STATE produces a genuinely fresh simulation.
 generate_prediction_intervals <- function(model_object, train_df, pred_df, position,
                                            n_bootstrap = 30,
                                            n_noise_draws = 50,
                                            random_state = 62820,
-                                           min_oob_rows = 200,
-                                           max_nrounds = 2000,
-                                           early_stopping_rounds = 50) {
-  # Reuse the exact feature set and tuned hyperparameters from the trained point model
+                                           n_resid_bins = 10) {
+  # Reuse the exact feature set, tuned hyperparameters, and CV-chosen tree count from the point model
   feature_cols <- model_object$features
   best_params <- model_object$best_params
+  fixed_nrounds <- model_object$best_nrounds
 
   # Filter training data to the position group, mirroring train_position_model
   pos_df <- train_df %>%
@@ -368,8 +371,17 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
   X_pred <- data.matrix(pred_pos[, feature_cols, drop = FALSE])
   n_pred <- nrow(X_pred)
 
-  # Storage: n_noise_draws rows per bootstrap (stacked), one column per predicted player
-  pred_mat <- matrix(NA_real_, nrow = n_bootstrap * n_noise_draws, ncol = n_pred)
+  # The center of every player's band = the SAME full-data model prediction carried downstream as
+  # `Predicted`, so the intervals bracket the number on the draft sheet, not the bootstrap mean.
+  point_pred <- predict(model_object$model, newdata = X_pred)
+
+  # --- Pass 1: cluster-bootstrap refits at a FIXED tree count (no early stopping) ---
+  # base_all[b, ] holds each refit's eval-player predictions (the epistemic / model-uncertainty
+  # spread). Every iteration's out-of-bag (fitted, residual) pairs are collected into one GLOBAL
+  # pool, later binned by fitted value to draw level-appropriate (heteroscedastic) aleatoric noise.
+  base_all <- matrix(NA_real_, nrow = n_bootstrap, ncol = n_pred)
+  pool_fitted <- vector("list", n_bootstrap)
+  pool_resid  <- vector("list", n_bootstrap)
 
   for (b in seq_len(n_bootstrap)) {
     set.seed(random_state + b)
@@ -384,24 +396,15 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       }),
       use.names = FALSE
     )
+    # Out-of-bag players (never drawn) feed the global residual pool
+    oob_idx <- which(group_ids %in% setdiff(unique_players, boot_players))
 
-    # Out-of-bag players are those never drawn this iteration
-    oob_players <- setdiff(unique_players, boot_players)
-    oob_idx <- which(group_ids %in% oob_players)
-    use_oob <- length(oob_idx) >= min_oob_rows
-
-    # Use OOB rows as the early-stopping eval set when the set is large enough
+    # Fit at the point model's fixed tree count - no watchlist / early stopping, so the OOB rows are
+    # never used for round selection and stay fully honest for the residual pool below.
     dtrain <- xgb.DMatrix(data = X_tr[in_bag_idx, , drop = FALSE], label = y_tr[in_bag_idx])
-    if (use_oob) {
-      doob <- xgb.DMatrix(data = X_tr[oob_idx, , drop = FALSE], label = y_tr[oob_idx])
-      watchlist <- list(train = dtrain, eval = doob)
-    } else {
-      watchlist <- list(train = dtrain)
-    }
-
     booster <- xgb.train(
       data = dtrain,
-      nrounds = max_nrounds,
+      nrounds = fixed_nrounds,
       max_depth = round(best_params[["max_depth"]]),
       eta = best_params[["eta"]],
       gamma = best_params[["gamma"]],
@@ -413,34 +416,53 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       objective = "reg:squarederror",
       eval_metric = "rmse",
       tree_method = "hist",
-      early_stopping_rounds = if (use_oob) early_stopping_rounds else NULL,
-      watchlist = watchlist,
+      seed = random_state + b,
       verbose = 0
     )
 
-    base_preds <- predict(booster, newdata = X_pred)
+    base_all[b, ] <- predict(booster, newdata = X_pred)
 
-    # Rows of pred_mat reserved for this bootstrap's noise draws
-    row_start <- (b - 1) * n_noise_draws + 1
-    row_end <- b * n_noise_draws
-
-    # Replicate the model's point predictions across the noise draws, then perturb each draw
-    base_block <- matrix(base_preds, nrow = n_noise_draws, ncol = n_pred, byrow = TRUE)
-
-    # Widen the interval with de-biased OOB residual noise, drawn independently for every
-    # (draw, player) cell. Many draws per fitted model stabilize the tails without more fits.
-    if (use_oob) {
+    # Accumulate this iteration's OOB fitted/residual pairs into the global pool
+    if (length(oob_idx) > 0) {
       oob_preds <- predict(booster, newdata = X_tr[oob_idx, , drop = FALSE])
-      residuals <- y_tr[oob_idx] - oob_preds
-      residuals <- residuals - mean(residuals)
-      noise_block <- matrix(
-        sample(residuals, size = n_noise_draws * n_pred, replace = TRUE),
-        nrow = n_noise_draws, ncol = n_pred
-      )
-      pred_mat[row_start:row_end, ] <- base_block + noise_block
-    } else {
-      pred_mat[row_start:row_end, ] <- base_block
+      pool_fitted[[b]] <- oob_preds
+      pool_resid[[b]]  <- y_tr[oob_idx] - oob_preds
     }
+  }
+
+  # --- Global, fitted-value-binned residual pool (heteroscedastic aleatoric noise) ---
+  # Bin the pooled OOB residuals by their fitted value so a player draws noise sized to his own
+  # projection level (a stud's error band != a backup's). Residuals are centered WITHIN each bin so
+  # the noise is mean-zero per level and does not shift the Predicted-centered distribution.
+  g_fitted <- unlist(pool_fitted, use.names = FALSE)
+  g_resid  <- unlist(pool_resid,  use.names = FALSE)
+
+  bin_breaks <- unique(quantile(g_fitted, probs = seq(0, 1, length.out = n_resid_bins + 1), na.rm = TRUE))
+  n_bins_eff <- length(bin_breaks) - 1
+  g_bin <- findInterval(g_fitted, bin_breaks, rightmost.closed = TRUE, all.inside = TRUE)
+
+  bin_residuals <- lapply(seq_len(n_bins_eff), function(k) {
+    r <- g_resid[g_bin == k]
+    if (length(r) == 0) numeric(0) else r - mean(r)
+  })
+  global_centered <- g_resid - mean(g_resid)   # fallback for any thin/empty bin
+  pred_bin <- findInterval(point_pred, bin_breaks, rightmost.closed = TRUE, all.inside = TRUE)
+
+  # --- Pass 2: assemble the predictive sample per player ---
+  # final = Predicted + epistemic deviation (refit spread re-centered on Predicted) + binned noise.
+  # n_bootstrap refits x n_noise_draws noise draws = Monte Carlo samples per player.
+  ensemble_mean <- colMeans(base_all)
+  n_samples <- n_bootstrap * n_noise_draws
+  pred_mat <- matrix(NA_real_, nrow = n_samples, ncol = n_pred)
+
+  set.seed(random_state)   # reproducible noise draws for a given RANDOM_STATE
+  min_bin <- 30            # if a bin is too thin, fall back to the global residual pool
+  for (j in seq_len(n_pred)) {
+    epi_dev <- rep(base_all[, j] - ensemble_mean[j], each = n_noise_draws)
+    pool_j <- bin_residuals[[pred_bin[j]]]
+    if (length(pool_j) < min_bin) pool_j <- global_centered
+    noise_j <- if (length(pool_j) > 0) sample(pool_j, n_samples, replace = TRUE) else 0
+    pred_mat[, j] <- point_pred[j] + epi_dev + noise_j
   }
 
   # Aggregate across bootstraps into per-player percentile intervals
@@ -490,9 +512,9 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
       # Disentangle WHY a player grades as upside - raw ceiling vs. contained downside - by expressing
       # each band edge as a multiple of the model's own central estimate (pred_mean). Both are already
       # scale-free ratios, so they compare directly across players and positions without standardizing.
-      #   ceiling_room (Ceiling / pred_mean, > 1): how far the p90 ceiling reaches above the projection
+      #   ceiling_room (Ceiling / pred_mean, > 1): how far the p95 ceiling reaches above the projection
       #     - a large value flags upside driven by a high ceiling (boom potential).
-      #   floor_share  (Floor / pred_mean, < 1): how much of the projection the p10 floor retains
+      #   floor_share  (Floor / pred_mean, < 1): how much of the projection the p05 floor retains
       #     - a value near 1 flags upside driven by a high floor / safety (low bust risk).
       ceiling_room = if_else(pred_mean > 0, Ceiling / pred_mean, NA_real_),
       floor_share  = if_else(pred_mean > 0, Floor / pred_mean, NA_real_)
@@ -542,7 +564,10 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
   }
 
   plot_df <- full_df %>%
-    filter(Player %in% sampled_players)
+    filter(Player %in% sampled_players) %>%
+    # Order players by predicted rank (highest first) so the color gradient and legend run from the
+    # top-predicted player to the bottom-predicted player
+    mutate(Player = factor(Player, levels = sampled_players))
 
   # Split each trajectory into a solid historical leg and a dashed eval->prediction leg.
   # Both include the eval-year point, so the dashed projection connects seamlessly to the line.
@@ -555,18 +580,18 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
     slice_max(Year, n = 1, with_ties = FALSE) %>%
     ungroup()
 
-  # 6. Coastal Breeze palette (darker tint)
-  coastal_colors <- c(
-    "#2C5985",  # Dark steel blue
+  # Coastal Breeze gradient: map the player ordering (highest predicted -> lowest) onto a dark-to-light
+  # blue ramp, so the top player is the darkest hue and the bottom player the lightest. Uses the blue
+  # tones of the coastal palette; the teal/gray members are dropped so the gradient lightens
+  # monotonically instead of wobbling between hues.
+  coastal_ramp <- colorRampPalette(c(
+    "#2C5985",  # Dark steel blue    (darkest  -> highest predicted player)
     "#457C99",  # Dusty blue
     "#639DB8",  # Muted sky blue
-    "#87BFD6",  # Cooler blue (formerly sky blue, darkened)
-    "#A0C5CF",  # Muted powder blue
-    "#507D76",  # Slate green-teal
-    "#7F91A6",  # Cool grayish-blue
-    "#476072"   # Dark coastal teal
-  )
-  pastel_colors <- rep(coastal_colors, length.out = length(unique(plot_df$Player)))
+    "#87BFD6",  # Cooler blue
+    "#A0C5CF"   # Muted powder blue  (lightest -> lowest predicted player)
+  ))
+  gradient_colors <- setNames(coastal_ramp(length(sampled_players)), sampled_players)
 
   ggplot(plot_df, aes(x = Year, y = points, color = Player, group = Player)) +
     # Solid historical trajectory, then a dashed leg into the prediction year
@@ -587,7 +612,7 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
     ) +
     scale_x_date(expand = expansion(mult = c(0.01, 0.2)), date_breaks = "1 year", date_labels = "%Y") +
     coord_cartesian(clip = "off") +
-    scale_color_manual(values = pastel_colors) +
+    scale_color_manual(values = gradient_colors) +
     labs(
       title = paste0(pos_group, " Career Trajectories + ", format(pred_year, "%Y"),
                      " Predictions (Tier ", tier, ": ranks ", start_rank, "-", end_rank, ")"),
@@ -881,6 +906,8 @@ combined <-
     avg_qbr_3yr = rollapplyr(QBR, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_epa_per_att_3yr = rollapplyr(passing_epa_per_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_adj_net_yards_att_3yr = rollapplyr(passing_adj_net_yards_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    # Trailing 3yr OLS slope of ANY/A - a QB efficiency-trajectory signal (rising vs. fading arm/decisions)
+    passing_adj_net_yards_att_trend_3yr = rollapplyr(passing_adj_net_yards_att, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
     passing_yards_att_3yr = rollapplyr(passing_yards_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_cpoe_3yr = rollapplyr(passing_cpoe, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     pacr_3yr = rollapplyr(pacr, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
@@ -901,9 +928,13 @@ combined <-
 
     # Adding a rolling avg for rushing/receiving efficiency stats
     rush_epa_per_att_3yr = rollapplyr(rush_epa_per_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    # Trailing 3yr OLS slope of rushing EPA/att - a rushing-efficiency trajectory signal (athletic gain/decline)
+    rush_epa_per_att_trend_3yr = rollapplyr(rush_epa_per_att, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
     touches_3yr = rollapplyr(touches, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     receiving_epa_per_target_3yr = rollapplyr(receiving_epa_per_target, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     receiving_yards_target_3yr = rollapplyr(receiving_yards_target, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    # Trailing 3yr OLS slope of yards/target - a receiving-efficiency trajectory signal (separation/YAC gain/decline)
+    receiving_yards_target_trend_3yr = rollapplyr(receiving_yards_target, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
     Tgt_3yr = rollapplyr(Tgt, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     catch_percent_3yr = rollapplyr(catch_percent, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     adjusted_targets_3yr = rollapplyr(adjusted_targets, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
@@ -1011,7 +1042,7 @@ qb_features <- c(
   "estimated_rookie_year", "G", "games_last_year", "injured_last_year",
   "missing_pre_2006", "num_missing_years", "num_teams_prior", "pacr",
   "pacr_3yr", "pass_att_per_game", "pass_att_per_game_delta", "passing_1D",
-  "passing_adj_net_yards_att", "passing_adj_net_yards_att_3yr", "passing_adot", "passing_adot_3yr",
+  "passing_adj_net_yards_att", "passing_adj_net_yards_att_3yr", "passing_adj_net_yards_att_trend_3yr", "passing_adot", "passing_adot_3yr",
   "passing_att", "passing_avg_yards_att", "passing_comp", "passing_comp_pct",
   "passing_cpoe", "passing_cpoe_3yr", "passing_epa_per_att", "passing_epa_per_att_3yr",
   "passing_int", "passing_int_pct", "passing_net_yards_att", "passing_sack",
@@ -1046,7 +1077,7 @@ rb_features <- c(
   "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_y_g",
   "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr", "receiving_yds",
   "receiving_yds_rec", "rush_1D", "rush_att", "rush_attempts_per_game",
-  "rush_efficiency", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_fbl",
+  "rush_efficiency", "rush_epa_per_att", "rush_epa_per_att_3yr", "rush_epa_per_att_trend_3yr", "rush_fbl",
   "rush_td", "rush_yds", "rush_yds_att", "rush_yds_game",
   "rushing_td_rate", "seasons_played", "target_share", "target_share_3yr",
   "target_share_delta", "target_share_vs_3yr", "targets_per_game", "targets_per_game_3yr",
@@ -1074,7 +1105,7 @@ wr_features <- c(
   "prior_injury_flag", "racr", "racr_3yr", "Rec",
   "receiving_1D", "receiving_air_yards", "receiving_epa_per_target", "receiving_epa_per_target_3yr",
   "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_y_g",
-  "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr", "receiving_yds",
+  "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr", "receiving_yards_target_trend_3yr", "receiving_yds",
   "receiving_yds_rec", "rush_att", "rush_epa_per_att", "rush_epa_per_att_3yr",
   "rush_fbl", "rush_td", "rush_yds", "rush_yds_att",
   "rush_yds_game", "seasons_played", "target_share", "target_share_3yr",

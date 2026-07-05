@@ -7,9 +7,10 @@
 # percentiles predict that same quantity, so coverage is checkable with zero recompute.
 #
 # A well-calibrated 80% interval [p10, p90] should contain ~80% of the realized outcomes.
-# If empirical coverage sits well below nominal, the intervals are too NARROW (widen them,
-# e.g. raise n_noise_draws, scale residuals, or add a calibration multiplier); well above
-# nominal means they are too WIDE.
+# The aleatoric noise is already heteroscedastic (OOB residuals are binned by fitted value in
+# generate_prediction_intervals), so read miscalibration two ways: a *global* miss (too narrow or
+# too wide everywhere) points to more noise draws or a calibration multiplier, while a miss that
+# *varies by projection level* (see section 3) points back at the residual binning itself.
 #
 # HOW TO RUN: step through 01_build_nfl_model.R at least through the interval-generation
 # block, leaving qb_intervals / rb_intervals / wr_intervals and qb_pred_df / rb_pred_df /
@@ -123,10 +124,32 @@ calibration_plot <-
 
 print(calibration_plot)
 
+# --- 3. Conditional coverage by projection level ---
+# The whole point of binning the residuals by fitted value is to make coverage FLAT across
+# projection tiers. This is the direct test: bin players within their position by quartile of the
+# point estimate (pred_p50), then pool by tier across positions. If the heteroscedastic noise is
+# working, cover_80 stays ~0.80 in every tier. The failure mode it catches is a homoscedastic tilt
+# - low-projection players over-covered (bands too wide) and high-projection under-covered (too
+# narrow), which would show as cover_80 rising from Q1 to Q4 (or the reverse).
+level_coverage <-
+  coverage_all %>%
+  group_by(Pos) %>%
+  mutate(level_bin = ntile(pred_p50, 4)) %>%   # within-position quartile of the point estimate
+  ungroup() %>%
+  group_by(level_bin) %>%
+  coverage_summary() %>%
+  mutate(level_bin = factor(level_bin, labels = c("Q1 (low)", "Q2", "Q3", "Q4 (high)"))) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+cat("\n=== Coverage by projection level (within-position quartiles; cover_80 should stay ~0.80 across tiers) ===\n")
+print(level_coverage)
+
 cat(
-  "\nReading the table:\n",
-  "- cover_80 << 0.80  -> intervals too NARROW (raise n_noise_draws, scale residuals, or widen).\n",
+  "\nReading the tables:\n",
+  "- cover_80 << 0.80  -> intervals too NARROW (raise n_noise_draws or add a calibration multiplier).\n",
   "- cover_80 >> 0.80  -> intervals too WIDE.\n",
   "- below_floor vs above_ceiling imbalance -> skew miscalibration (one tail off more than the other).\n",
+  "- section 3: cover_80 drifting Q1 -> Q4 -> heteroscedastic tilt remains (residual binning not fully\n",
+  "  correcting the level dependence); flat across tiers -> the binned noise is doing its job.\n",
   "On the plot, points sitting below the dashed line at high quantiles indicate under-coverage.\n"
 )
