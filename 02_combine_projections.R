@@ -164,10 +164,10 @@ combined_projections <-
     Player.y = if_else(is_fp_primary, Player.y, NA_character_)
   ) %>%
   ungroup() %>%
-  # Floor/Ceiling/upside_index/ceiling_room/floor_share are carried through untouched - they stay the
+  # Floor/Ceiling/upside_index/ceiling_index/floor_index are carried through untouched - they stay the
   # model's own expectation (not manually adjusted, not blended), shown beside the blended Final_Projection
   select(player_id, Player = Player.x, Pos, Predicted, FantasyPros_Player = Player.y, Projected_Points,
-         Floor, Ceiling, upside_index, ceiling_room, floor_share) %>%
+         Floor, Ceiling, upside_index, ceiling_index, floor_index) %>%
   mutate(PosGroup = if_else(Pos == "QB", "QB", "SKILL")) # Grouping QBs separately from skill positions for blending
 
 # Adjusting model predictions for players that are expected to miss games during the upcoming season
@@ -248,7 +248,7 @@ final_df <-
          Model_Prediction = Predicted,
          FantasyPros_Prediction = Projected_Points,
          Final_Projection = final_projection,
-         Floor, Ceiling, ceiling_room, floor_share, upside_index) %>%  # model's own range, carried through untouched
+         Floor, Ceiling, ceiling_index, floor_index, upside_index) %>%  # model's own range, carried through untouched
   arrange(Pos, desc(Final_Projection)) %>%
   filter(!is.na(FantasyPros_Prediction)) # Removing players without a FantasyPros Projection, these players are out of the league or retired
 

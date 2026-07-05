@@ -11,7 +11,7 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 742026   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+RANDOM_STATE <- 10314   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -30,6 +30,7 @@ RANDOM_STATE <- 742026   # Seed threaded into train_position_model; change it (e
 # TODO: Re-run the estimate_vorp_zscore_blend script for 2026
 # TODO: Create plot to visualize the breakouts of player tiers in 03_
 # DONE: Adjust color palette in career trajectories so that it is directly gradient from best-worst
+# TODO: Test out new upside_index formula
 
 
 # Function to train the XGBoost model for a specific position
@@ -182,7 +183,7 @@ train_position_model <- function(df, position, feature_cols,
       eta = c(0.01, 0.2),
       gamma = c(0, 0.15),
       min_child_weight = c(1, 12),
-      subsample = c(0.7, 1.0),
+      subsample = c(0.6, 1.0),
       colsample_bytree = c(0.6, 0.95),
       lambda = c(1, 10),    # L2 regularization
       alpha = c(0, 3)       # L1 regularization
@@ -465,8 +466,42 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     pred_mat[, j] <- point_pred[j] + epi_dev + noise_j
   }
 
-  # Aggregate across bootstraps into per-player percentile intervals
+  # Aggregate across the Monte Carlo samples into per-player percentile intervals
   col_quantile <- function(p) apply(pred_mat, 2, quantile, probs = p, na.rm = TRUE)
+
+  # Standardize a vector to mean 100 / sd 15 (IQ/wRC+-style); returns a flat 100 if it has no spread
+  index_100 <- function(x) {
+    s <- sd(x, na.rm = TRUE)
+    if (is.na(s) || s == 0) rep(100, length(x)) else 100 + 15 * (x - mean(x, na.rm = TRUE)) / s
+  }
+
+  # Level-adjust a signal into a studentized residual against the projection level, so BOTH its
+  # average AND its spread are equalized across levels. A mean-only detrend flattens the average but a
+  # higher-variance level still over-populates the tail (we saw ~0% of top-tier vs ~41% of another
+  # tier clearing the bar); dividing by the local spread fixes that, giving every projection level an
+  # equal shot at scoring high. The inner smooth() fits value-vs-level (loess, linear fallback for
+  # tiny pools); center = residual, scale = smooth of |residual| (~ conditional sd), floored to avoid
+  # blowups. Vectors (not data-mask columns) are passed in so loess behaves inside mutate.
+  level_adjust <- function(x, level) {
+    smooth <- function(y) {
+      df <- data.frame(y = y, level = level)
+      fit <- tryCatch(
+        if (sum(is.finite(y) & is.finite(level)) >= 10) {
+          loess(y ~ level, data = df, span = 0.75, na.action = na.exclude)
+        } else {
+          lm(y ~ level, data = df, na.action = na.exclude)
+        },
+        error = function(e) lm(y ~ level, data = df, na.action = na.exclude)
+      )
+      predict(fit, newdata = df)
+    }
+    resid <- x - smooth(x)                    # center: above/below typical for the level
+    local_scale <- smooth(abs(resid))         # scale: typical |residual| at the level (~ conditional sd)
+    floor_scale <- 0.05 * median(abs(resid), na.rm = TRUE)
+    if (!is.finite(floor_scale) || floor_scale <= 0) floor_scale <- 1
+    local_scale <- ifelse(is.finite(local_scale) & local_scale > floor_scale, local_scale, floor_scale)
+    resid / local_scale
+  }
 
   data.frame(
     player_id = pred_pos$player_id,
@@ -481,45 +516,34 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     stringsAsFactors = FALSE
   ) %>%
     mutate(
-      Floor = pred_p05,                  # Floor and Ceiling default to the 80% interval
+      Floor = pred_p05,                  # Floor and Ceiling default to the 90% interval
       Ceiling = pred_p95,
       pred_width = pred_p95 - pred_p05,
       pred_upside = pred_p95 - pred_mean,    # ceiling distance above the mean (reported as-is)
       pred_downside = pred_mean - pred_p05,  # floor distance below the mean (reported as-is)
-      # Raw asymmetry ratio: upside earned per unit of downside risk. Intermediate only - it is
-      # standardized into upside_index below, then dropped. Two choices keep it from being
-      # mechanically tied to a player's predicted level:
-      #   (#1) pivot on the MEDIAN, not the mean — the bootstrap distribution is right-skewed, so a
-      #        mean pivot systematically inflates the downside and deflates the upside.
-      #   (#2) stabilize with a single per-position constant eps (2% of the position's median
-      #        prediction) applied to BOTH sides — a mean-scaled, denominator-only floor would drag
-      #        the ratio down for high scorers purely as an artifact.
-      eps = 0.02 * median(pred_mean),
-      upside_ratio = (pred_p95 - pred_p50 + eps) / (pred_p50 - pred_p05 + eps)
-    ) %>%
-    # Cross-position upside index (the carried tie-breaker): standardize the raw ratio within this
-    # position group to a mean of 100 and sd of 15 (IQ/wRC+-style). 100 = average upside for the
-    # position, <100 below, >100 above, so a value is directly comparable across QB/RB/WR (equal
-    # spread => equal rarity). It is a linear rescale, so the within-position ranking (and thus the
-    # tie-breaker ordering) is identical to the raw ratio. generate_prediction_intervals is called
-    # once per position, so mean/sd here center on the correct group.
-    mutate(
-      upside_index = {
-        mu <- mean(upside_ratio, na.rm = TRUE)
-        sigma <- sd(upside_ratio, na.rm = TRUE)
-        if (is.na(sigma) || sigma == 0) 100 else 100 + 15 * (upside_ratio - mu) / sigma
-      },
-      # Disentangle WHY a player grades as upside - raw ceiling vs. contained downside - by expressing
-      # each band edge as a multiple of the model's own central estimate (pred_mean). Both are already
-      # scale-free ratios, so they compare directly across players and positions without standardizing.
-      #   ceiling_room (Ceiling / pred_mean, > 1): how far the p95 ceiling reaches above the projection
-      #     - a large value flags upside driven by a high ceiling (boom potential).
-      #   floor_share  (Floor / pred_mean, < 1): how much of the projection the p05 floor retains
-      #     - a value near 1 flags upside driven by a high floor / safety (low bust risk).
+
+      # Scale-free band edges relative to the projection (the "predicted value level" normalization).
+      # Intermediates only: each is detrended vs level and standardized into an index below, then dropped.
       ceiling_room = if_else(pred_mean > 0, Ceiling / pred_mean, NA_real_),
-      floor_share  = if_else(pred_mean > 0, Floor / pred_mean, NA_real_)
+      floor_share  = if_else(pred_mean > 0, Floor   / pred_mean, NA_real_),
+
+      # Two direct, level-NEUTRAL signals: level_adjust() studentizes each band-edge ratio against the
+      # projection level (equalizing BOTH its average and its spread, so no projection tier is favored
+      # in the center or the tail), then index_100 standardizes WITHIN position to mean 100 / sd 15.
+      # Each answers one thing:
+      #   ceiling_index: who has an unusually high CEILING for their projection level
+      #   floor_index:   who has an unusually high / safe FLOOR for their projection level
+      ceiling_index = index_100(level_adjust(ceiling_room, pred_mean)),
+      floor_index   = index_100(level_adjust(floor_share,  pred_mean)),
+
+      # Single sortable upside score = positive-deviation magnitude of the two indices. This is an OR,
+      # not an AND: a player is rewarded for spiking on EITHER axis, earns extra for both, and is never
+      # penalized for an ordinary axis (a below-100 index contributes 0). Re-standardized to 100/15 so
+      # 100 = typical for the position and higher = a stronger ceiling-or-floor outlier. With the
+      # components now level-neutral, this no longer tracks the projection.
+      upside_index = index_100(sqrt(pmax(ceiling_index - 100, 0)^2 + pmax(floor_index - 100, 0)^2))
     ) %>%
-    select(-eps, -upside_ratio)
+    select(-ceiling_room, -floor_share)
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
@@ -1195,17 +1219,19 @@ rb_intervals <- generate_prediction_intervals(rb_model, model_df, rb_pred_df, "R
 wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "WR", random_state = RANDOM_STATE)
 intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
 
+# Visualizing projected rank movement vs last season, 20 players per tier by predicted rank
+plot_rank_movement(combined, qb_preds, pos_group = "QB", tier = 1)
+plot_rank_movement(combined, rb_preds, pos_group = "RB", tier = 1)
+plot_rank_movement(combined, wr_preds, pos_group = "WR", tier = 1)
+plot_rank_movement(combined, wr_preds, pos_group = "TE", tier = 1)
+
 # Visualizing predicted player performance trajectories
 plot_predicted_trajectories(combined, qb_preds, pos_group = "QB", tier = 1)
 plot_predicted_trajectories(combined, rb_preds, pos_group = "RB", tier = 1)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "WR", tier = 1)
 plot_predicted_trajectories(combined, wr_preds, pos_group = "TE", tier = 1)
 
-# Visualizing projected rank movement vs last season, 20 players per tier by predicted rank
-plot_rank_movement(combined, qb_preds, pos_group = "QB", tier = 1)
-plot_rank_movement(combined, rb_preds, pos_group = "RB", tier = 1)
-plot_rank_movement(combined, wr_preds, pos_group = "WR", tier = 1)
-plot_rank_movement(combined, wr_preds, pos_group = "TE", tier = 1)
+
 
 # Saving out final combined dataframe. Joining the bootstrap floor/ceiling intervals on the unique
 # player_id (not name) so players who share a name + position - e.g. the two Adrian Petersons -
@@ -1218,7 +1244,7 @@ final <-
     intervals_all %>%
       select(player_id, Floor, Ceiling, pred_mean,
              pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width,
-             pred_downside, pred_upside, ceiling_room, floor_share, upside_index),
+             pred_downside, pred_upside, ceiling_index, floor_index, upside_index),
     by = "player_id"
   )
 
