@@ -10,10 +10,10 @@ source("00_globals.R")
 ## SELECT EITHER UNDERDOG FANTASY OR ESPN ROSTER CUTOFF SUGGESTIONS
 ## Player pool size should be roughly 115% of total league roster spots available
 # Underdog Fantasy Player Cutoffs
-# QB_CUTOFF <- 30
-# RB_CUTOFF <- 82
-# WR_CUTOFF <- 104
-# TE_CUTOFF <- 28
+QB_CUTOFF <- 30
+RB_CUTOFF <- 82
+WR_CUTOFF <- 104
+TE_CUTOFF <- 28
 
 # Draftkings Fantasy Player Cutoffs
 # QB_CUTOFF <- 32
@@ -22,10 +22,10 @@ source("00_globals.R")
 # TE_CUTOFF <- 36
 
 # # ESPN Draft Cutoffs
-QB_CUTOFF <- 24
-RB_CUTOFF <- 51
-WR_CUTOFF <- 64
-TE_CUTOFF <- 25
+# QB_CUTOFF <- 24
+# RB_CUTOFF <- 51
+# WR_CUTOFF <- 64
+# TE_CUTOFF <- 25
 
 # # Yahoo Fantasy Player Cutoffs
 # QB_CUTOFF <- 26
@@ -149,8 +149,8 @@ total_df <-
     # VORP = projection - replacement-level projection
     vorp = (Final_Projection - Replacement_Value),
     
-    # Combine Z and VORP with weights, multiplying VORP by 2.25 to increase distribution for value estimation accuracy (2.25 was selected after regression analysis, see estimate_vorp_zscore..)
-    Relative_Value = 0.5 * z_score_value + 0.5 * (vorp *2.25)
+    # Combine Z and VORP with weights, multiplying VORP by 1.3 to increase distribution for value estimation accuracy (1.3 was selected after regression analysis, see estimate_vorp_zscore..)
+    Relative_Value = 0.5 * z_score_value + 0.5 * (vorp * 1.3)
   ) %>%
   # Adjusting the Relative Value based on position, QBs are generally less valuable in best ball fantasy football, so we reduce their value slightly
   mutate(
@@ -200,7 +200,7 @@ tier_df <-
 ## Quarterbacks
 plot_wss_elbow(tier_df, pos = "QB", max_k = 15)
 
-qb_df <- assign_positional_tiers(tier_df, pos = "QB", k = 7)
+qb_df <- assign_positional_tiers(tier_df, pos = "QB", k = 8)
 
 ## Runningbacks
 plot_wss_elbow(tier_df, pos = "RB", max_k = 15)
@@ -210,7 +210,7 @@ rb_df <- assign_positional_tiers(tier_df, pos = "RB", k = 7)
 ## Wide Receivers
 plot_wss_elbow(tier_df, pos = "WR", max_k = 15)
 
-wr_df <- assign_positional_tiers(tier_df, pos = "WR", k = 8)
+wr_df <- assign_positional_tiers(tier_df, pos = "WR", k = 6)
 
 ## Tight Ends
 plot_wss_elbow(tier_df, pos = "TE", max_k = 15)

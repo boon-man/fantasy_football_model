@@ -1,15 +1,17 @@
 ##############################################################################
 ### Estimating weights to set for Relative Value & Z-Score Blending
-library(rvest)
+### ADP source is now the Underdog Fantasy flat export (data/underdog_adp_rankings.csv),
+### since FantasyPros removed free access to its ADP rankings.
+library(readr)
 library(data.table)
-library(rvest)
 library(dplyr)
+library(tidyr)
 library(stringr)
-library(janitor)
 
-PRED_YEAR <- 2025
+PRED_YEAR <- 2026
+SCORING_TYPE <- "HALF"
 
-player_df <- read_csv(paste0("data/blended_proj_", as.character(PRED_YEAR), ".csv"))
+player_df <- read_csv(paste0("data/blended_proj_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
 
 ## SELECT EITHER UNDERDOG FANTASY OR ESPN ROSTER CUTOFF SUGGESTIONS
 ## Player pool size should be roughly 115% of total league roster spots available
@@ -21,8 +23,10 @@ TE_CUTOFF <- 28
 
 # Defining the Dampening variable to adjust final relative value scores
 # z-scores get thrown off due to large expert projections
-QB_DAMP <- 0.55
+QB_DAMP <- 0.6
+RB_DAMP <- 1.1
 TE_DAMP <- 0.9
+WR_DAMP <- 1.2
 
 # Setting the VORP cutoff to identify how a "replacement" player performs at the position
 VORP_CUTOFF <- 0.66
@@ -38,40 +42,22 @@ clean_player_name <- function(name) {
     str_to_title()
 }
 
-# Scraping FantasyPros projections each player's best ball ADP
-scrape_fp_projections <- function(position) {
-  url <- paste0("https://www.fantasypros.com/nfl/adp/best-ball-overall.php")
-  
-  # Read and parse the HTML table
-  adp_page <- read_html(url)
-  
-  adp_df <- adp_page %>%
-    html_element("table") %>%
-    html_table(fill = TRUE) %>%
-    clean_names() %>%
-    rename(
-      Rank = rank,
-      Player_Team_Bye = player_team_bye,
-      Pos = pos,
-      ADP = avg
+# Reading each player's best ball ADP from the Underdog Fantasy flat export.
+# (FantasyPros removed free ADP access, so we swapped the scrape for data/underdog_adp_rankings.csv.)
+# Underdog ships one row per player with separate name columns and a clean position in slotName,
+# so we assemble the same Player / Pos / ADP shape the downstream regression join expects.
+read_underdog_adp <- function(path = "data/underdog_adp_rankings.csv") {
+  read_csv(path, show_col_types = FALSE) %>%
+    transmute(
+      Player = clean_player_name(paste(firstName, lastName)),  # match the join key format
+      Pos = slotName,                                          # QB / RB / WR / TE, no rank suffix
+      ADP = as.numeric(adp)
     ) %>%
-    mutate(
-      # Extract player name from "Player Team (Bye)"
-      Player = str_trim(str_remove(Player_Team_Bye, "\\s\\(.*\\)$")),  # remove (Bye)
-      Player = str_remove(Player, "\\s+[A-Z]{2,3}$"),                  # remove team code (e.g., "Cin")
-      Player = clean_player_name(Player),  # clean player name
-      Pos = str_remove_all(Pos, "\\d+"),  # remove any numbers from position
-      ADP = as.numeric(ADP),
-      Rank = as.integer(Rank)
-    ) %>%
-    select(Player, Pos, ADP)
-  
-  return(adp_df)
+    drop_na(ADP)
 }
 
 # Reading in ADP data
-adp_df <- 
-  scrape_fp_projections() 
+adp_df <- read_underdog_adp()
 
 # Trimming down the player pool to the positional cutoff points
 player_df <-
@@ -131,3 +117,4 @@ summary(value_model)
 
 # Z Score coefficient: -.23
 # VORP coefficient: -2.33
+# VORP coefficient 2026: 1.30
