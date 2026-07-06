@@ -30,7 +30,6 @@ RANDOM_STATE <- 10314   # Seed threaded into train_position_model; change it (e.
 # TODO: Re-run the estimate_vorp_zscore_blend script for 2026
 # TODO: Create plot to visualize the breakouts of player tiers in 03_
 # DONE: Adjust color palette in career trajectories so that it is directly gradient from best-worst
-# TODO: Test out new upside_index formula
 
 
 # Function to train the XGBoost model for a specific position

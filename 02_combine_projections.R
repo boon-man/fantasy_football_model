@@ -15,16 +15,38 @@ PROJ_DAMP        <- 0.95  # Dampening factor for expert projections, they are pr
 QB_PENALTY_FACTOR <- 0.85  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 
-# Scraping FantasyPros projections for each position
-scrape_fp_projections <- function(position, scoring = "HALF") {
+# Scraping FantasyPros projections for each position.
+# FantasyPros intermittently answers bare user-agents (and rapid-fire requests) with a
+# truncated ~10-row "preview" of the projections table, so we send a browser user-agent and
+# re-request with a short back-off until the full position list comes back (min_rows guard).
+scrape_fp_projections <- function(position, scoring = "HALF", min_rows = 20, max_tries = 4) {
   url <- paste0("https://www.fantasypros.com/nfl/projections/", position, ".php?week=draft&scoring=", scoring, "&week=draft")
-  
-  page <- read_html(url)
-  
-  table <- page %>%
-    html_node("table") %>%
-    html_table(fill = TRUE)
-  
+
+  # One request -> parsed projections table. Reading the response text through a browser
+  # user-agent avoids the stripped-down table rvest's default agent sometimes receives.
+  fetch_once <- function() {
+    resp <- GET(
+      url,
+      user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+      add_headers("Accept-Language" = "en-US,en;q=0.9")
+    )
+    read_html(content(resp, as = "text", encoding = "UTF-8")) %>%
+      html_node("table") %>%
+      html_table(fill = TRUE)
+  }
+
+  # Retry while the table looks truncated (the preview table only carries ~10 players)
+  table <- fetch_once()
+  tries <- 1
+  while (nrow(table) < min_rows && tries < max_tries) {
+    Sys.sleep(3)
+    table <- fetch_once()
+    tries <- tries + 1
+  }
+  if (nrow(table) < min_rows) {
+    warning(sprintf("FantasyPros %s returned only %d rows after %d tries", position, nrow(table), tries))
+  }
+
   table <- table %>%
     rename_with(~ str_trim(.x)) %>%
     rename(Player = 1, Projected_Points = ncol(.)) %>%
@@ -34,7 +56,7 @@ scrape_fp_projections <- function(position, scoring = "HALF") {
       Pos = toupper(position)
     ) %>%
     select(Player, Pos, Projected_Points)
-  
+
   return(table)
 }
 
@@ -79,7 +101,7 @@ plot_pred_vs_proj_dumbbell <- function(projection_df, pos_group = "QB", top_n = 
     # we draw the lines explicitly at the .5 boundary between each block of 10.
     geom_hline(
       yintercept = top_n - seq(5, top_n - 1, by = 5) + 0.5,
-      linetype = "dashed", color = "#00000F", linewidth = 0.4, alpha = 0.4
+      linetype = "dashed", color = "#00000F", linewidth = 0.4, alpha = 0.25
     ) +
     # Connector between the model and expert estimate for each player
     geom_segment(
@@ -133,9 +155,14 @@ plot_pred_vs_proj_dumbbell <- function(projection_df, pos_group = "QB", top_n = 
 player_df <- read_csv(paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
 
 # Pulling in fantasypros predictions
-# Dropping inadvertent string rows from the projections column
-fp_projections <- 
-  bind_rows(lapply(positions, function(pos) scrape_fp_projections(pos, scoring = SCORING_TYPE))) %>%
+# Pausing between positions so FantasyPros doesn't throttle the back-to-back requests down
+# to its truncated preview table, then dropping the header/string rows from the points column
+fp_projections <-
+  bind_rows(lapply(positions, function(pos) {
+    out <- scrape_fp_projections(pos, scoring = SCORING_TYPE)
+    Sys.sleep(3)
+    out
+  })) %>%
   mutate(Projected_Points = as.numeric(str_remove(Projected_Points, "[A-Za-z]"))) %>%
   drop_na(Projected_Points)
 
@@ -174,46 +201,8 @@ combined_projections <-
 combined_projections <- combined_projections %>%
   mutate(
     Predicted = case_when(
-      Player == "Alexander Mattison" ~ Predicted * 0.5, # Banished to bench warming
-      Player == "Antonio Gibson" ~ Predicted * 0.5, # Banished to bench warming
-      Player == "Austin Ekeler" ~ Predicted * 0.8, # Banished to bench warming
-      Player == "Brandon Aiyuk" ~ Predicted * 0.6, # Injury
-      Player == "Brian Robinson" ~ Predicted * 0.85, # Team hates him?
-      Player == "Bucky Irving" ~ Predicted * 1.25, # Now a starter
-      Player == "Cam Akers" ~ Predicted * 0.25, # Banished to bench warming
-      Player == "Chase Brown" ~ Predicted * 1.2, # Now a starter
-      Player == "Chris Godwin" ~ Predicted * 0.75, # Recovering from injury
-      Player == "Christian Watson" ~ Predicted * 0.40, # Torn ACL
-      Player == "Clyde Edwardshelaire" ~ Predicted * 0.33, # PTSD?
-      Player == "Cole Kmet" ~ Predicted * 0.8, # Now a backup
-      Player == "Cordarrelle Patterson" ~ Predicted * 0.33, # Cut, washed
-      Player == "Darnell Mooney" ~ Predicted * 0.85, # Injury
-      Player == "Dameon Pierce" ~ Predicted * 0.50, # Banished to bench warming
-      Player == "Deandre Hopkins" ~ Predicted * 0.75, # Washed, now a slot receiver
-      Player == "Emmanuel Wilson" ~ Predicted * 0.5, # Banished to bench warming
-      Player == "Jakobi Meyers" ~ Predicted * 0.9, # Hates his team
-      Player == "Jayden Reed" ~ Predicted * 0.75, # Injury
-      Player == "Jaylen Warren" ~ Predicted * 1.25, # Now a projected starter
-      Player == "Joe Mixon" ~ Predicted * 0.6,       # Broken foot
-      Player == "Jonnu Smith" ~ Predicted * 0.8, # Aaron Rodgers
-      Player == "Jordan Addison" ~ Predicted * 0.85, # DUI
-      Player == "Jordan Mason" ~ Predicted * 1.25, # Splitting starting duties
-      Player == "Keenan Allen" ~ Predicted * 0.8, # No longer a starter
-      Player == "Michael Carter" ~ Predicted * 0.25, # Banished to bench warming
-      Player == "Michael Pittman" ~ Predicted * 0.85, # Anthony Richardson
-      Player == "Mike Williams" ~ Predicted * 0.00,    # Retiring
-      Player == "Najee Harris" ~ Predicted * 0.7,     # Blew his damn eyes off
-      Player == "Nick Chubb" ~ Predicted * 0.9,       # Broken foot
-      Player == "Pierre Strong" ~ Predicted * 0.25, # Banished to bench warming
-      Player == "Rachaad White" ~ Predicted * 0.8, # Now a backup
-      Player == "Rashee Rice" ~ Predicted * 0.62,     # DUI
-      Player == "Ricky Pearsall" ~ Predicted * 1.35, # Was shot, only WR left on team
-      Player == "Russell Wilson" ~ Predicted * 0.8, # Model needs to chill out with Russ a bit
-      Player == "Sam Darnold" ~ Predicted * 0.85, # Model needs to chill out with Darnold a bit
-      Player == "Stefon Diggs" ~ Predicted * 0.9,     # Torn ACL
-      Player == "Tank Dell" ~ Predicted * 0.10,        # Torn ACL
-      Player == "Tyrone Tracy" ~ Predicted * 1.2, # Now a starter
-      Player == "Xavier Worthy" ~ Predicted * 1.35,    # Teammate has DUI
+      Player == "Alexander Mattison" ~ Predicted * 1.0, # Banished to bench warming
+      Player == "Xavier Worthy" ~ Predicted * 1.00,    # Teammate has DUI
       TRUE ~ Predicted
     )
   )
@@ -260,3 +249,45 @@ plot_pred_vs_proj_dumbbell(final_df, pos_group = "WR", top_n = 30)
 plot_pred_vs_proj_dumbbell(final_df, pos_group = "TE", top_n = 30)
 
 fwrite(final_df, paste0("data/blended_proj_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
+
+
+      # Player == "Alexander Mattison" ~ Predicted * 0.5, # Banished to bench warming
+      # Player == "Antonio Gibson" ~ Predicted * 0.5, # Banished to bench warming
+      # Player == "Austin Ekeler" ~ Predicted * 0.8, # Banished to bench warming
+      # Player == "Brandon Aiyuk" ~ Predicted * 0.6, # Injury
+      # Player == "Brian Robinson" ~ Predicted * 0.85, # Team hates him?
+      # Player == "Bucky Irving" ~ Predicted * 1.25, # Now a starter
+      # Player == "Cam Akers" ~ Predicted * 0.25, # Banished to bench warming
+      # Player == "Chase Brown" ~ Predicted * 1.2, # Now a starter
+      # Player == "Chris Godwin" ~ Predicted * 0.75, # Recovering from injury
+      # Player == "Christian Watson" ~ Predicted * 0.40, # Torn ACL
+      # Player == "Clyde Edwardshelaire" ~ Predicted * 0.33, # PTSD?
+      # Player == "Cole Kmet" ~ Predicted * 0.8, # Now a backup
+      # Player == "Cordarrelle Patterson" ~ Predicted * 0.33, # Cut, washed
+      # Player == "Darnell Mooney" ~ Predicted * 0.85, # Injury
+      # Player == "Dameon Pierce" ~ Predicted * 0.50, # Banished to bench warming
+      # Player == "Deandre Hopkins" ~ Predicted * 0.75, # Washed, now a slot receiver
+      # Player == "Emmanuel Wilson" ~ Predicted * 0.5, # Banished to bench warming
+      # Player == "Jakobi Meyers" ~ Predicted * 0.9, # Hates his team
+      # Player == "Jayden Reed" ~ Predicted * 0.75, # Injury
+      # Player == "Jaylen Warren" ~ Predicted * 1.25, # Now a projected starter
+      # Player == "Joe Mixon" ~ Predicted * 0.6,       # Broken foot
+      # Player == "Jonnu Smith" ~ Predicted * 0.8, # Aaron Rodgers
+      # Player == "Jordan Addison" ~ Predicted * 0.85, # DUI
+      # Player == "Jordan Mason" ~ Predicted * 1.25, # Splitting starting duties
+      # Player == "Keenan Allen" ~ Predicted * 0.8, # No longer a starter
+      # Player == "Michael Carter" ~ Predicted * 0.25, # Banished to bench warming
+      # Player == "Michael Pittman" ~ Predicted * 0.85, # Anthony Richardson
+      # Player == "Mike Williams" ~ Predicted * 0.00,    # Retiring
+      # Player == "Najee Harris" ~ Predicted * 0.7,     # Blew his damn eyes off
+      # Player == "Nick Chubb" ~ Predicted * 0.9,       # Broken foot
+      # Player == "Pierre Strong" ~ Predicted * 0.25, # Banished to bench warming
+      # Player == "Rachaad White" ~ Predicted * 0.8, # Now a backup
+      # Player == "Rashee Rice" ~ Predicted * 0.62,     # DUI
+      # Player == "Ricky Pearsall" ~ Predicted * 1.35, # Was shot, only WR left on team
+      # Player == "Russell Wilson" ~ Predicted * 0.8, # Model needs to chill out with Russ a bit
+      # Player == "Sam Darnold" ~ Predicted * 0.85, # Model needs to chill out with Darnold a bit
+      # Player == "Stefon Diggs" ~ Predicted * 0.9,     # Torn ACL
+      # Player == "Tank Dell" ~ Predicted * 0.10,        # Torn ACL
+      # Player == "Tyrone Tracy" ~ Predicted * 1.2, # Now a starter
+      # Player == "Xavier Worthy" ~ Predicted * 1.35,    # Teammate has DUI

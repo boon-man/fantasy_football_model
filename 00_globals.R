@@ -2,7 +2,7 @@
 # Every numbered script sources this file, so add new package requirements here
 # rather than calling library() inside individual scripts or functions.
 required_packages <- c(
-  "rvest", "dplyr", "stringr", "forecast", "tidyr", "tidyverse",
+  "rvest", "httr", "dplyr", "stringr", "forecast", "tidyr", "tidyverse",
   "zoo", "ggplot2", "lubridate", "data.table", "rBayesianOptimization",
   "caret", "xgboost", "ggrepel", "nflreadr", "ranger"
 )
