@@ -27,9 +27,10 @@ RANDOM_STATE <- 10314   # Seed threaded into train_position_model; change it (e.
 # DONE: Add in additional features to improve model performance
 # DONE: Fix the annotations in plots to have adjustable x and y points so that they can be custom for qb/rb/wr
 # DONE: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
-# TODO: Re-run the estimate_vorp_zscore_blend script for 2026
-# TODO: Create plot to visualize the breakouts of player tiers in 03_
+# DONE: Re-run the estimate_vorp_zscore_blend script for 2026
+# DONE: Create plot to visualize the breakouts of player tiers in 03_
 # DONE: Adjust color palette in career trajectories so that it is directly gradient from best-worst
+# TODO: Adjust where the expert projections dampening happens so it is dampened on import, so the dampened projections are referenced in subsequent visuals
 
 
 # Function to train the XGBoost model for a specific position

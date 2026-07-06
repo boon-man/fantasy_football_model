@@ -103,6 +103,238 @@ assign_positional_tiers <- function(player_df, pos, k = 5) {
   return(pos_df)
 }
 
+# Visualizing the tier structure for a single position: every player is plotted at their
+# positional ranking (x) against their blended Final_Projection (y), colored by Pos_Tier so the
+# tier breaks read as bands down the projection curve. The top player (highest projection) in each
+# tier is labeled by name to anchor where each tier begins. Colors come from the MetBrewer
+# "Hiroshige" palette, interpolated across however many tiers the position has.
+#
+# Set interactive = TRUE to return a ggiraph htmlwidget instead of a static ggplot: every point
+# gains a hover tooltip (player name, positional rank, projection), which surfaces the names of the
+# players that aren't the per-tier leader label. The static repel labels render underneath unchanged.
+# In the interactive view the hover ring and the tooltip text both take the hovered player's tier
+# color (points are drawn as filled rings so the outline can be recolored), on a white tooltip card.
+plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
+  # Filter to the position, order by rank, and treat the tier as an ordered factor for coloring
+  pos_df <-
+    player_df %>%
+    filter(Pos == pos) %>%
+    arrange(Pos_Ranking) %>%
+    mutate(Pos_Tier = factor(Pos_Tier, levels = sort(unique(Pos_Tier))))
+
+  # The highest-projected player in each tier anchors that tier's label
+  tier_leaders <-
+    pos_df %>%
+    group_by(Pos_Tier) %>%
+    slice_max(Final_Projection, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+  # Pull one Hiroshige color per tier (continuous interpolation handles any tier count)
+  tier_colors <- met.brewer("Hiroshige", n = nlevels(pos_df$Pos_Tier), type = "continuous")
+
+  # Precompute each row's tier hex + an HTML tooltip whose text is colored to that tier, so the
+  # tooltip can sit on a white card and still read in the tier color (inline color beats the card CSS)
+  pos_df <-
+    pos_df %>%
+    mutate(
+      tier_hex = tier_colors[as.integer(Pos_Tier)],
+      tooltip_html = paste0(
+        "<span style='color:", tier_hex, ";'>",
+        "<b>", Player, " - ", Pos, Pos_Ranking, "</b></span>"
+      )
+    )
+
+  # Swap in ggiraph's interactive point layer when requested. Points are drawn as shape 21 (a filled
+  # ring): the ring color is mapped to Pos_Tier, so the hover effect only has to thicken it - keeping
+  # the highlight in the tier's own color. A plain geom_point is used for the static version.
+  point_layer <-
+    if (interactive) {
+      geom_point_interactive(
+        aes(fill = Pos_Tier, tooltip = tooltip_html, data_id = Player),
+        shape = 21, size = 2, stroke = 0.4, alpha = 0.9
+      )
+    } else {
+      geom_point(size = 2, alpha = 0.9)
+    }
+
+  tier_plot <-
+    ggplot(pos_df, aes(x = Pos_Ranking, y = Final_Projection, color = Pos_Tier)) +
+    point_layer +
+    # Name the top player of each tier, nudged clear of the points with connector lines
+    geom_text_repel(
+      data = tier_leaders,
+      aes(label = Player),
+      size = 3.2, fontface = "bold", show.legend = FALSE,
+      min.segment.length = 0, box.padding = 0.6, max.overlaps = Inf, seed = 42
+    ) +
+    scale_color_manual(values = tier_colors, name = "Tier") +
+    labs(
+      title = paste0(pos, " Tiers by Positional Ranking"),
+      subtitle = "Blended final projection vs positional rank, colored by tier (top player per tier labeled)",
+      x = "Positional Ranking",
+      y = "Final Projection"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(colour = "#262626", size = 16, face = "bold"),
+      plot.subtitle = element_text(colour = "#595959", size = 11),
+      axis.text = element_text(colour = "#262626"),
+      panel.grid.minor = element_blank()
+    )
+
+  # Static ggplot for the plot pane
+  if (!interactive) return(tier_plot)
+
+  # Match the ring fill to the same palette (merges into the single "Tier" legend), then render.
+  # Hover thickens the tier-colored ring; the tooltip is a white card with tier-colored inline text.
+  tier_plot <- tier_plot + scale_fill_manual(values = tier_colors, name = "Tier")
+
+  girafe(
+    ggobj = tier_plot,
+    width_svg = 8, height_svg = 6,
+    options = list(
+      opts_hover(css = "stroke-width:2.5px;"),
+      opts_tooltip(
+        use_fill = FALSE, use_stroke = FALSE,
+        css = paste0(
+          "background-color:#ffffff;border:1px solid #d9d9d9;border-radius:4px;",
+          "padding:6px 8px;font-size:12px;box-shadow:1px 1px 4px rgba(0,0,0,0.25);"
+        )
+      )
+    )
+  )
+}
+
+# Scatter of the model prediction (x) against the FantasyPros expert projection (y), colored by
+# tier. A dashed line marks agreement: points above it are players the experts are higher on than the
+# model (expert reaches), points below are the model's relative values / sleepers. The n_label
+# players with the largest *percentage* divergence between the two estimates (how much the higher
+# estimate exceeds the lower, in either direction) are named so the sharpest outliers stand out.
+# Pass a position to focus on one group (colors then use the positional tier); leave pos = NULL for
+# the whole board (colors use the overall tier). interactive = TRUE mirrors plot_positional_tiers:
+# hover surfaces each player's name/values with a tier-colored ring and tooltip text on a white card.
+# Supply replacement_points (the Pos / Replacement_Value frame built earlier in this script) to gate
+# the outlier LABELS to players at or above their position's replacement level - a percentage metric
+# otherwise gets dominated by deep, low-projection players where a small point gap is a huge percent.
+plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_label = 10,
+                                 replacement_points = NULL, width_svg = 12, height_svg = 8) {
+  # Optionally focus on one position, and keep only players that have both estimates to compare
+  plot_df <-
+    player_df %>%
+    { if (!is.null(pos)) filter(., Pos == pos) else . } %>%
+    filter(!is.na(Model_Prediction), !is.na(FantasyPros_Prediction))
+
+  # Color by the positional tier when focused on a position, otherwise the overall tier
+  tier_source <- if (is.null(pos)) plot_df$Tier else plot_df$Pos_Tier
+  plot_df <-
+    plot_df %>%
+    mutate(Tier_grp = factor(tier_source, levels = sort(unique(tier_source))))
+
+  # One Hiroshige color per tier (continuous interpolation handles any tier count)
+  tier_colors <- met.brewer("Hiroshige", n = nlevels(plot_df$Tier_grp), type = "continuous")
+
+  # Per-row tier hex, plus two divergence measures: the signed point gap (for direction) and the
+  # percent divergence (how much the higher estimate exceeds the lower - the outlier ranking metric).
+  # The denominator is floored at 1 so a near-zero projection can't manufacture a spurious outlier.
+  plot_df <-
+    plot_df %>%
+    mutate(
+      tier_hex = tier_colors[as.integer(Tier_grp)],
+      proj_gap = FantasyPros_Prediction - Model_Prediction,  # + = expert higher, - = model higher
+      pct_gap = (pmax(Model_Prediction, FantasyPros_Prediction) /
+                   pmax(pmin(Model_Prediction, FantasyPros_Prediction), 1) - 1) * 100,
+      tooltip_html = paste0(
+        "<span style='color:", tier_hex, ";'>",
+        "<b>", Player, "</b><br/>",
+        if_else(proj_gap >= 0, "Expert +", "Model +"), as.character(round(abs(proj_gap), 1)),
+        " (", round(pct_gap), "%)",
+        "</span>"
+      )
+    )
+
+  # Restrict the label candidates to players at/above their position's replacement level (when a
+  # replacement_points frame is supplied), so the percentage outliers reflect draftable players
+  # rather than deep guys whose small point gap is a large percent of a tiny projection
+  label_pool <- plot_df
+  if (!is.null(replacement_points)) {
+    label_pool <-
+      plot_df %>%
+      left_join(replacement_points, by = "Pos") %>%
+      filter(is.na(Replacement_Value) | Final_Projection >= Replacement_Value)
+  }
+
+  # The players the model and expert diverge on most in percentage terms (the top outliers)
+  divergers <-
+    label_pool %>%
+    slice_max(pct_gap, n = n_label, with_ties = FALSE)
+
+  # Interactive filled-ring points (recolorable outline) or plain points for the static version
+  point_layer <-
+    if (interactive) {
+      geom_point_interactive(
+        aes(fill = Tier_grp, tooltip = tooltip_html, data_id = Player),
+        shape = 21, size = 2.5, stroke = 0.4, alpha = 0.9
+      )
+    } else {
+      geom_point(size = 2.5, alpha = 0.9)
+    }
+
+  mve_plot <-
+    ggplot(plot_df, aes(x = Model_Prediction, y = FantasyPros_Prediction, color = Tier_grp)) +
+    # Agreement line: model == expert
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#999999", linewidth = 0.4, alpha=0.9) +
+    point_layer +
+    # Name the biggest percentage model-vs-expert outliers
+    geom_text_repel(
+      data = divergers,
+      aes(label = Player),
+      size = 3.6, fontface = "bold", show.legend = FALSE,
+      min.segment.length = 0, box.padding = 0.5, max.overlaps = Inf, seed = 42
+    ) +
+    # Corner annotations naming each side of the agreement line (replaces the subtitle):
+    # top-left = experts higher than the model, bottom-right = model higher than experts
+    annotate("text", x = -Inf, y = Inf, label = "Expert Favored",
+             hjust = -0.3, vjust = 10.0, fontface = "bold", size = 7, alpha = 0.4, color = "#595959") +
+    annotate("text", x = Inf, y = -Inf, label = "Model Favored",
+             hjust = 1.5, vjust = -10, fontface = "bold", size = 7, alpha = 0.4, color = "#595959") +
+    scale_color_manual(values = tier_colors, name = "Tier") +
+    labs(
+      title = paste0("Model vs Expert Projection", if (!is.null(pos)) paste0(" - ", pos) else ""),
+      x = "Model Prediction",
+      y = "FantasyPros Projection"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      plot.title = element_text(colour = "#262626", size = 19, face = "bold"),
+      axis.title = element_text(colour = "#262626", size = 15),
+      axis.text = element_text(colour = "#262626", size = 13),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12),
+      panel.grid.minor = element_blank()
+    )
+
+  # Static ggplot for the plot pane
+  if (!interactive) return(mve_plot)
+
+  # Match ring fill to the palette (single "Tier" legend), then render interactively
+  mve_plot <- mve_plot + scale_fill_manual(values = tier_colors, name = "Tier")
+
+  girafe(
+    ggobj = mve_plot,
+    width_svg = width_svg, height_svg = height_svg,
+    options = list(
+      opts_hover(css = "stroke-width:2.5px;"),
+      opts_tooltip(
+        use_fill = FALSE, use_stroke = FALSE,
+        css = paste0(
+          "background-color:#ffffff;border:1px solid #d9d9d9;border-radius:4px;",
+          "padding:6px 8px;font-size:12px;box-shadow:1px 1px 4px rgba(0,0,0,0.25);"
+        )
+      )
+    )
+  )
+}
+
 # Reading in the player projection's data
 player_df <- read_csv(paste0("data/blended_proj_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
 
@@ -225,7 +457,18 @@ final_df <- bind_rows(list(qb_df, rb_df, wr_df, te_df)) %>%
          FP_Pos_Ranking, Pos_Ranking, Overall_Ranking,
          Relative_Value, Tier, Pos_Tier)
 
-# TODO: create a scatterplot of player projections, with color grouping by position tier?
+# Inspect each position's tier structure (projection vs positional rank, colored by tier)
+plot_positional_tiers(final_df, pos = "QB", interactive = TRUE)
+plot_positional_tiers(final_df, pos = "RB", interactive = TRUE)
+plot_positional_tiers(final_df, pos = "WR", interactive = TRUE)
+plot_positional_tiers(final_df, pos = "TE", interactive = TRUE)
+
+# Model vs expert agreement: whole board (overall tiers) and per position (positional tiers).
+# Pass replacement_points so the labeled outliers are gated to at/above-replacement players.
+plot_model_vs_expert(final_df, pos = "QB", interactive = TRUE, replacement_points = replacement_points)
+plot_model_vs_expert(final_df, pos = "RB", interactive = TRUE, replacement_points = replacement_points)
+plot_model_vs_expert(final_df, pos = "WR", interactive = TRUE, replacement_points = replacement_points)
+plot_model_vs_expert(final_df, pos = "TE", interactive = TRUE, replacement_points = replacement_points)
 
 ########################## MISSION COMPLETE ####################################
 # Save the final dataframe with tiers
