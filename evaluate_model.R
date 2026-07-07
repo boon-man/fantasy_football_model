@@ -8,7 +8,7 @@
 # === THEME === #
 
 # Color palette for NFL visualizations
-NFL_COLOR_PALETTE <- c("#637ae4", "#37d784", "#d7326f", "#51e9eb", "#103737")
+NFL_COLOR_PALETTE <- c("#98A2CE", "#73B995", "#B8708A", "#8DCDCE", "#214F4F")
 
 # Custom ggplot theme for NFL visualizations
 # Clean classic feel with bolder titles and faint gridlines for readability
@@ -86,7 +86,7 @@ plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15,
     geom_point(alpha = 0.65, size = 1.4, color = NFL_COLOR_PALETTE[1]) +
     geom_smooth(
       method = "lm", se = TRUE, level = 0.99,
-      color = "#4A79B8", fill = "#AFC7E8", alpha = 0.18, linewidth = 0.4
+      color = "#98a2ceba", fill = "#AFC7E8", alpha = 0.18, linewidth = 0.4
     ) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey", alpha = 0.6) +
     geom_text_repel(
@@ -96,12 +96,12 @@ plot_actual_vs_pred <- function(pred_df, pos_label = "", top_n = 15,
       min.segment.length = 0, max.overlaps = Inf
     ) +
     annotate(
-      "text", x = overperf_x, y = overperf_y,
-      label = "Overperformers", fontface = "bold", size = 4.5, alpha = 0.7
+      "text", x = overperf_x, y = overperf_y, color = "black",
+      label = "Overperformers", fontface = "bold", size = 4, alpha = 0.65
     ) +
     annotate(
-      "text", x = underperf_x, y = underperf_y,
-      label = "Underperformers", fontface = "bold", size = 4.5, alpha = 0.7
+      "text", x = underperf_x, y = underperf_y, color = "black",
+      label = "Underperformers", fontface = "bold", size = 4, alpha = 0.65
     ) +
     labs(
       title = paste(pos_label, "Actual vs Predicted Fantasy Points"),
@@ -208,8 +208,8 @@ plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y =
 
   ggplot(decile_calib, aes(x = mean_pred, y = mean_actual)) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "lightgrey", alpha = 0.8) +
-    geom_line(color = NFL_COLOR_PALETTE[3], alpha = 0.9, linewidth = 0.75) +
-    geom_point(color = NFL_COLOR_PALETTE[3], alpha = 0.9, size = 2) +
+    geom_line(color = NFL_COLOR_PALETTE[2], alpha = 0.9, linewidth = 0.75) +
+    geom_point(color = NFL_COLOR_PALETTE[2], alpha = 0.9, size = 1.5) +
     geom_text(
       aes(label = diff_label),
       nudge_y = nudge_y, color = "#555555", fontface = "bold", size = 3

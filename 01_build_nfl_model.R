@@ -11,7 +11,7 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 10314   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+RANDOM_STATE <- 1031   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -1142,14 +1142,14 @@ wr_features <- c(
 )
 
 # Creating models and making predictions for each major positional group
-qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 10, n_iter = 38, random_state = RANDOM_STATE)
+qb_model <- train_position_model(model_df, "QB", qb_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
 plot_feature_importance(qb_model$model, qb_model$features, top_n = 25) +
   ggtitle("Quarterback Feature Importance")
 qb_model_preds <- qb_model[['predictions']] %>%
   mutate(diff = Predicted - Actual) %>%
   arrange(diff)
 
-rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 10, n_iter = 38, random_state = RANDOM_STATE)
+rb_model <- train_position_model(model_df, "RB", rb_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
 plot_feature_importance(rb_model$model, rb_model$features, top_n = 25) +
   ggtitle("Rushing Feature Importance")
 rb_model_preds <- rb_model[['predictions']] %>%
@@ -1157,7 +1157,7 @@ rb_model_preds <- rb_model[['predictions']] %>%
   arrange(diff)
 
 # IMPORTANT: TEs will be included in the WR model by default
-wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 10, n_iter = 38, random_state = RANDOM_STATE)
+wr_model <- train_position_model(model_df, "WR", wr_features, init_points = 12, n_iter = 36, random_state = RANDOM_STATE)
 plot_feature_importance(wr_model$model, wr_model$features, top_n = 25) +
   ggtitle("Receiving Feature Importance")
 wr_model_preds <- wr_model[['predictions']] %>%
@@ -1191,20 +1191,17 @@ report_holdout_performance(wr_model, "WR/TE")
 
 # Rendering model diagnostics per position, run each plot as needed
 # QB diagnostics
-plot_actual_vs_pred(qb_model_preds, "QB", overperf_x = 125)
-plot_resid_vs_pred(qb_model_preds, "QB")
+plot_actual_vs_pred(qb_model_preds, "QB", overperf_x = 125, underperf_x = 250, overperf_y = 325)
 plot_resid_hist(qb_model_preds, "QB", binwidth = 10, band = 75)
 plot_decile_calib(qb_model_preds, "QB")
 
 # RB diagnostics
 plot_actual_vs_pred(rb_model_preds, "RB", overperf_x = 100)
-plot_resid_vs_pred(rb_model_preds, "RB")
 plot_resid_hist(rb_model_preds, "RB")
 plot_decile_calib(rb_model_preds, "RB")
 
 # WR/TE diagnostics
 plot_actual_vs_pred(wr_model_preds, "WR/TE", overperf_x = 80)
-plot_resid_vs_pred(wr_model_preds, "WR/TE")
 plot_resid_hist(wr_model_preds, "WR/TE", binwidth = 5)
 plot_decile_calib(wr_model_preds, "WR/TE")
 
