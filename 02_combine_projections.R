@@ -10,8 +10,8 @@ positions <- c("rb", "qb", "wr", "te")
 ## Per-position weight on my model's prediction vs the FantasyPros projection.
 ## Keyed by Pos and looked up per row; the projection weight is the complement (1 - pred weight)
 ## so the pair always sums to 1. QB and receivers lean on the model, RB leans on expert consensus.
-PRED_WEIGHTS <- c(QB = 0.50, RB = 0.40, WR = 0.60, TE = 0.60)
-PROJ_DAMP        <- 0.95  # Dampening factor for expert projections, they are pretty aggressive
+PRED_WEIGHTS <- c(QB = 0.45, RB = 0.4, WR = 0.60, TE = 0.60)
+PROJ_DAMP        <- 0.9  # Dampening factor for expert projections (applied in the blend below), they are pretty aggressive
 QB_PENALTY_FACTOR <- 0.85  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 
@@ -215,17 +215,18 @@ blended_df <-
     # Look up each player's model weight by position, projection weight is the complement
     pred_w = PRED_WEIGHTS[Pos],
     proj_w = 1 - pred_w,
+    # Dampen the (raw, un-dampened) expert projection here in the blend via PROJ_DAMP
     final_projection = case_when(
       !is.na(Predicted) & !is.na(Projected_Points) ~
         pred_w * Predicted +
         (proj_w * Projected_Points * PROJ_DAMP),
 
       !is.na(Predicted) ~ Predicted,
-      
+
       is.na(Predicted) & !is.na(Projected_Points) ~
         PROJ_DAMP * Projected_Points *
         if_else(PosGroup == "QB", QB_PENALTY_FACTOR, SKILL_PENALTY_FACTOR),
-      
+
       TRUE ~ NA_real_
     )
   )

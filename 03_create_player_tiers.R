@@ -42,7 +42,7 @@ VORP_CUTOFF <- 0.66
 # rankings should roughly reflect expected positional scarcity when drafting
 QB_DAMP <- 0.6
 RB_DAMP <- 1.1
-TE_DAMP <- 0.9
+TE_DAMP <- 0.85
 WR_DAMP <- 1.2
 
 # Function for estimating optimal K value
@@ -151,10 +151,10 @@ plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
     if (interactive) {
       geom_point_interactive(
         aes(fill = Pos_Tier, tooltip = tooltip_html, data_id = Player),
-        shape = 21, size = 2, stroke = 0.4, alpha = 0.9
+        shape = 21, size = 3, stroke = 0.4, alpha = 0.9
       )
     } else {
-      geom_point(size = 2, alpha = 0.9)
+      geom_point(size = 3, alpha = 0.9)
     }
 
   tier_plot <-
@@ -164,7 +164,7 @@ plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
     geom_text_repel(
       data = tier_leaders,
       aes(label = Player),
-      size = 3.2, fontface = "bold", show.legend = FALSE,
+      size = 3.6, fontface = "bold", show.legend = FALSE,
       min.segment.length = 0, box.padding = 0.6, max.overlaps = Inf, seed = 42
     ) +
     scale_color_manual(values = tier_colors, name = "Tier") +
@@ -174,11 +174,14 @@ plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
       x = "Positional Ranking",
       y = "Final Projection"
     ) +
-    theme_minimal(base_size = 13) +
+    theme_minimal(base_size = 15) +
     theme(
-      plot.title = element_text(colour = "#262626", size = 16, face = "bold"),
-      plot.subtitle = element_text(colour = "#595959", size = 11),
-      axis.text = element_text(colour = "#262626"),
+      plot.title = element_text(colour = "#262626", size = 19, face = "bold"),
+      plot.subtitle = element_text(colour = "#595959", size = 13),
+      axis.title = element_text(colour = "#262626", size = 15),
+      axis.text = element_text(colour = "#262626", size = 13),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12),
       panel.grid.minor = element_blank()
     )
 
@@ -191,7 +194,7 @@ plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
 
   girafe(
     ggobj = tier_plot,
-    width_svg = 8, height_svg = 6,
+    width_svg = 10, height_svg = 7,
     options = list(
       opts_hover(css = "stroke-width:2.5px;"),
       opts_tooltip(
@@ -205,19 +208,26 @@ plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
   )
 }
 
-# Scatter of the model prediction (x) against the FantasyPros expert projection (y), colored by
-# tier. A dashed line marks agreement: points above it are players the experts are higher on than the
-# model (expert reaches), points below are the model's relative values / sleepers. The n_label
-# players with the largest *percentage* divergence between the two estimates (how much the higher
-# estimate exceeds the lower, in either direction) are named so the sharpest outliers stand out.
+# Scatter of each player's model positional rank (x, by the blended Final_Projection) against their
+# FantasyPros expert positional rank (y, by the raw expert projection), colored by tier. Ranks
+# (1 = best) are used instead of raw projections so the enormous expert point totals no longer
+# stretch the plot. Both axes are reversed so the best players sit in
+# the TOP-RIGHT. A dashed line marks agreement: points toward the top-left are ranked better by the
+# experts than the model (expert favored), points toward the bottom-right are the model's relative
+# values / sleepers (model favored). The n_label players with the largest rank disagreement (spots
+# apart between the two rankings) are named so the sharpest outliers stand out.
 # Pass a position to focus on one group (colors then use the positional tier); leave pos = NULL for
 # the whole board (colors use the overall tier). interactive = TRUE mirrors plot_positional_tiers:
-# hover surfaces each player's name/values with a tier-colored ring and tooltip text on a white card.
+# hover surfaces each player's name/ranks with a tier-colored ring and tooltip text on a white card.
 # Supply replacement_points (the Pos / Replacement_Value frame built earlier in this script) to gate
-# the outlier LABELS to players at or above their position's replacement level - a percentage metric
-# otherwise gets dominated by deep, low-projection players where a small point gap is a huge percent.
+# the outlier LABELS to players at or above their position's replacement level.
+# final_pred toggles the "model" axis: TRUE (default) ranks by the blended Final_Projection,
+# FALSE ranks by the underlying Model_Prediction (the pure model, pre-blend, sharper contrast).
 plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_label = 10,
-                                 replacement_points = NULL, width_svg = 12, height_svg = 8) {
+                                 replacement_points = NULL, final_pred = TRUE,
+                                 width_svg = 12, height_svg = 8) {
+  # Label for the model side, echoing the final_pred choice into the axis title and tooltip
+  model_label <- if (final_pred) "Final" else "Model"
   # Optionally focus on one position, and keep only players that have both estimates to compare
   plot_df <-
     player_df %>%
@@ -233,28 +243,33 @@ plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_l
   # One Hiroshige color per tier (continuous interpolation handles any tier count)
   tier_colors <- met.brewer("Hiroshige", n = nlevels(plot_df$Tier_grp), type = "continuous")
 
-  # Per-row tier hex, plus two divergence measures: the signed point gap (for direction) and the
-  # percent divergence (how much the higher estimate exceeds the lower - the outlier ranking metric).
-  # The denominator is floored at 1 so a near-zero projection can't manufacture a spurious outlier.
+  # Rank players within their position by each estimate (rank 1 = best), then measure the gap between
+  # the two rankings. rank_diff's sign gives direction (+ = experts rank them better/lower number),
+  # rank_gap its magnitude - the outlier metric and the visual distance from the agreement line.
   plot_df <-
     plot_df %>%
+    group_by(Pos) %>%
+    mutate(
+      # Model side ranks by the blended Final_Projection or the pure Model_Prediction per final_pred
+      model_rank = if (final_pred) dense_rank(desc(Final_Projection)) else dense_rank(desc(Model_Prediction)),
+      expert_rank = dense_rank(desc(FantasyPros_Prediction))
+    ) %>%
+    ungroup() %>%
     mutate(
       tier_hex = tier_colors[as.integer(Tier_grp)],
-      proj_gap = FantasyPros_Prediction - Model_Prediction,  # + = expert higher, - = model higher
-      pct_gap = (pmax(Model_Prediction, FantasyPros_Prediction) /
-                   pmax(pmin(Model_Prediction, FantasyPros_Prediction), 1) - 1) * 100,
+      rank_diff = model_rank - expert_rank,  # + = experts rank better (lower), - = model ranks better
+      rank_gap = abs(rank_diff),
       tooltip_html = paste0(
         "<span style='color:", tier_hex, ";'>",
-        "<b>", Player, "</b><br/>",
-        if_else(proj_gap >= 0, "Expert +", "Model +"), as.character(round(abs(proj_gap), 1)),
-        " (", round(pct_gap), "%)",
+        "<b>", Player, " - ", Pos, "</b><br/>",
+        model_label, " ", Pos, model_rank, " &middot; Expert ", Pos, expert_rank, "<br/>",
+        if_else(rank_diff >= 0, "Expert +", "Model +"), as.character(rank_gap), " spots",
         "</span>"
       )
     )
 
   # Restrict the label candidates to players at/above their position's replacement level (when a
-  # replacement_points frame is supplied), so the percentage outliers reflect draftable players
-  # rather than deep guys whose small point gap is a large percent of a tiny projection
+  # replacement_points frame is supplied), so the outliers reflect draftable players
   label_pool <- plot_df
   if (!is.null(replacement_points)) {
     label_pool <-
@@ -263,10 +278,10 @@ plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_l
       filter(is.na(Replacement_Value) | Final_Projection >= Replacement_Value)
   }
 
-  # The players the model and expert diverge on most in percentage terms (the top outliers)
+  # The players the model and expert rank most differently (the top outliers by spots apart)
   divergers <-
     label_pool %>%
-    slice_max(pct_gap, n = n_label, with_ties = FALSE)
+    slice_max(rank_gap, n = n_label, with_ties = FALSE)
 
   # Interactive filled-ring points (recolorable outline) or plain points for the static version
   point_layer <-
@@ -280,28 +295,31 @@ plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_l
     }
 
   mve_plot <-
-    ggplot(plot_df, aes(x = Model_Prediction, y = FantasyPros_Prediction, color = Tier_grp)) +
-    # Agreement line: model == expert
+    ggplot(plot_df, aes(x = model_rank, y = expert_rank, color = Tier_grp)) +
+    # Agreement line: model rank == expert rank
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#999999", linewidth = 0.4, alpha=0.9) +
     point_layer +
-    # Name the biggest percentage model-vs-expert outliers
+    # Name the biggest model-vs-expert rank disagreements
     geom_text_repel(
       data = divergers,
       aes(label = Player),
       size = 3.6, fontface = "bold", show.legend = FALSE,
       min.segment.length = 0, box.padding = 0.5, max.overlaps = Inf, seed = 42
     ) +
-    # Corner annotations naming each side of the agreement line (replaces the subtitle):
-    # top-left = experts higher than the model, bottom-right = model higher than experts
-    annotate("text", x = -Inf, y = Inf, label = "Expert Favored",
-             hjust = -0.3, vjust = 10.0, fontface = "bold", size = 7, alpha = 0.4, color = "#595959") +
-    annotate("text", x = Inf, y = -Inf, label = "Model Favored",
-             hjust = 1.5, vjust = -10, fontface = "bold", size = 7, alpha = 0.4, color = "#595959") +
+    # Both axes are reversed (rank 1 = best sits top-right), so the corners flip relative to raw data:
+    # top-left = experts rank better, bottom-right = model ranks better
+    annotate("text", x = Inf, y = -Inf, label = "Expert Favored",
+             hjust = -0.5, vjust = 5, fontface = "bold", size = 7, alpha = 0.4, color = "#595959") +
+    annotate("text", x = -Inf, y = Inf, label = "Model Favored",
+             hjust = 1.5, vjust = -5.5, fontface = "bold", size = 7, alpha = 0.4, color = "#595959") +
     scale_color_manual(values = tier_colors, name = "Tier") +
+    # Major gridlines every 10 ranks, minor every 5 (both reversed so rank 1 sits top-right)
+    scale_x_reverse(breaks = seq(0, 400, by = 10), minor_breaks = seq(0, 400, by = 5)) +
+    scale_y_reverse(breaks = seq(0, 400, by = 10), minor_breaks = seq(0, 400, by = 5)) +
     labs(
-      title = paste0("Model vs Expert Projection", if (!is.null(pos)) paste0(" - ", pos) else ""),
-      x = "Model Prediction",
-      y = "FantasyPros Projection"
+      title = paste0("Model vs Expert Positional Rank", if (!is.null(pos)) paste0(" - ", pos) else ""),
+      x = paste0(model_label, " Positional Rank"),
+      y = "Expert Positional Rank"
     ) +
     theme_minimal(base_size = 15) +
     theme(
@@ -310,7 +328,9 @@ plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_l
       axis.text = element_text(colour = "#262626", size = 13),
       legend.title = element_text(size = 14),
       legend.text = element_text(size = 12),
-      panel.grid.minor = element_blank()
+      # Thin major gridlines, with fainter/thinner minor lines at the every-5 breaks
+      panel.grid.major = element_line(colour = "#D0D0D0", linewidth = 0.3),
+      panel.grid.minor = element_line(colour = "#ECECEC", linewidth = 0.2)
     )
 
   # Static ggplot for the plot pane
@@ -407,7 +427,7 @@ total_attrs <-
   select(Relative_Value)
 
 #### Obtaining clusters with optimal K value
-kmeans_attrs <- kmeans(total_attrs, centers = 9, nstart = 50)
+kmeans_attrs <- kmeans(total_attrs, centers = 10, nstart = 50)
 
 total_df$Tier <- kmeans_attrs$cluster
 
@@ -466,8 +486,8 @@ plot_positional_tiers(final_df, pos = "TE", interactive = TRUE)
 # Model vs expert agreement: whole board (overall tiers) and per position (positional tiers).
 # Pass replacement_points so the labeled outliers are gated to at/above-replacement players.
 plot_model_vs_expert(final_df, pos = "QB", interactive = TRUE, replacement_points = replacement_points)
-plot_model_vs_expert(final_df, pos = "RB", interactive = TRUE, replacement_points = replacement_points)
-plot_model_vs_expert(final_df, pos = "WR", interactive = TRUE, replacement_points = replacement_points)
+plot_model_vs_expert(final_df, pos = "RB", interactive = TRUE, replacement_points = replacement_points, final_pred = TRUE)
+plot_model_vs_expert(final_df, pos = "WR", interactive = TRUE, replacement_points = replacement_points, final_pred = TRUE)
 plot_model_vs_expert(final_df, pos = "TE", interactive = TRUE, replacement_points = replacement_points)
 
 ########################## MISSION COMPLETE ####################################
