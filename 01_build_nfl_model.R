@@ -11,7 +11,7 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 1031   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+RANDOM_STATE <- 7542   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -186,7 +186,7 @@ train_position_model <- function(df, position, feature_cols,
       min_child_weight = c(1, 12),
       subsample = c(0.6, 1.0),
       colsample_bytree = c(0.6, 0.95),
-      lambda = c(1, 10),    # L2 regularization
+      lambda = c(0, 10),    # L2 regularization
       alpha = c(0, 3)       # L1 regularization
     ),
     init_points = init_points,
@@ -1039,7 +1039,7 @@ model_df <-
   combined %>%
   filter(!is.na(points_next_year), G > 0) %>%
   filter(
-    (Pos == "QB" & points_next_year > 40) |
+    (Pos == "QB" & points_next_year > 35) |
       (Pos %in% c("RB", "WR") & points_next_year > 25) |
       (Pos == "TE" & points_next_year > 15)
   ) %>%

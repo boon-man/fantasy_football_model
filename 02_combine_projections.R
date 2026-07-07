@@ -10,8 +10,8 @@ positions <- c("rb", "qb", "wr", "te")
 ## Per-position weight on my model's prediction vs the FantasyPros projection.
 ## Keyed by Pos and looked up per row; the projection weight is the complement (1 - pred weight)
 ## so the pair always sums to 1. QB and receivers lean on the model, RB leans on expert consensus.
-PRED_WEIGHTS <- c(QB = 0.45, RB = 0.4, WR = 0.60, TE = 0.60)
-PROJ_DAMP        <- 0.9  # Dampening factor for expert projections (applied in the blend below), they are pretty aggressive
+PRED_WEIGHTS <- c(QB = 0.45, RB = 0.45, WR = 0.60, TE = 0.60)
+PROJ_DAMP        <- 0.95  # Dampening factor for expert projections (applied in the blend below), they are pretty aggressive
 QB_PENALTY_FACTOR <- 0.85  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 
