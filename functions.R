@@ -68,12 +68,12 @@ clean_traded_players <- function(df) {
 
 # Function for cleaning up player name columns for joining projection data together
 clean_player_name <- function(name) {
-  name |>
-    tolower() |>
-    str_remove_all("\\b(jr|sr|ii|iii|iv|v)\\b\\.?") |>  # remove suffixes
-    str_replace_all("['’\\.\\-]", "") |>                # remove apostrophes, periods, hyphens
-    str_replace_all("[^a-z ]", " ") |>                  # remove any remaining non-letter chars
-    str_squish() |>
+  name %>%
+    tolower() %>%
+    str_remove_all("\\b(jr|sr|ii|iii|iv|v)\\b\\.?") %>%  # remove suffixes
+    str_replace_all("['’\\.\\-]", "") %>%                # remove apostrophes, periods, hyphens
+    str_replace_all("[^a-z ]", " ") %>%                  # remove any remaining non-letter chars
+    str_squish() %>%
     str_to_title()
 }
 
@@ -94,29 +94,29 @@ load_player_metadata <- function(start_year, end_year) {
 
   # Static id crosswalk used to fill ESPN ids the roster data is missing
   espn_crosswalk <-
-    load_ff_playerids() |>
-    filter(!is.na(gsis_id), !is.na(espn_id)) |>
-    transmute(gsis_id, espn_id_crosswalk = as.character(espn_id)) |>
+    load_ff_playerids() %>%
+    filter(!is.na(gsis_id), !is.na(espn_id)) %>%
+    transmute(gsis_id, espn_id_crosswalk = as.character(espn_id)) %>%
     distinct(gsis_id, .keep_all = TRUE)
 
-  load_rosters(seasons = start_year:end_year) |>
-    filter(!is.na(gsis_id)) |>
+  load_rosters(seasons = start_year:end_year) %>%
+    filter(!is.na(gsis_id)) %>%
     # Older roster files store some columns as character, coercing for type stability across seasons
     mutate(
       espn_id = as.character(espn_id),
       birth_date = as.Date(birth_date),
       draft_number = as.numeric(draft_number),
       entry_year = as.numeric(entry_year)
-    ) |>
-    select(season, gsis_id, espn_id, birth_date, draft_number, entry_year) |>
-    distinct(season, gsis_id, .keep_all = TRUE) |>
+    ) %>%
+    select(season, gsis_id, espn_id, birth_date, draft_number, entry_year) %>%
+    distinct(season, gsis_id, .keep_all = TRUE) %>%
     # Carrying a known ESPN id to player seasons where the roster record is missing it
-    group_by(gsis_id) |>
-    mutate(espn_id = coalesce(espn_id, espn_id[!is.na(espn_id)][1])) |>
-    ungroup() |>
+    group_by(gsis_id) %>%
+    mutate(espn_id = coalesce(espn_id, espn_id[!is.na(espn_id)][1])) %>%
+    ungroup() %>%
     # Falling back to the static crosswalk when no roster season carries the id
-    left_join(espn_crosswalk, by = "gsis_id") |>
-    mutate(espn_id = coalesce(espn_id, espn_id_crosswalk)) |>
+    left_join(espn_crosswalk, by = "gsis_id") %>%
+    mutate(espn_id = coalesce(espn_id, espn_id_crosswalk)) %>%
     select(-espn_id_crosswalk)
 }
 
@@ -126,23 +126,23 @@ compute_team_wins <- function(start_year, end_year) {
 
   # Limiting the schedule to completed regular season games
   schedules <-
-    load_schedules(seasons = start_year:end_year) |>
-    filter(game_type == "REG") |>
+    load_schedules(seasons = start_year:end_year) %>%
+    filter(game_type == "REG") %>%
     filter(!is.na(home_score), !is.na(away_score))
 
   # Tallying results from the home team perspective
   home_results <-
-    schedules |>
+    schedules %>%
     transmute(season, team = home_team, won = home_score > away_score)
 
   # Tallying results from the away team perspective
   away_results <-
-    schedules |>
+    schedules %>%
     transmute(season, team = away_team, won = away_score > home_score)
 
   # Stacking both perspectives and summing wins for each team season
-  bind_rows(home_results, away_results) |>
-    group_by(season, team) |>
+  bind_rows(home_results, away_results) %>%
+    group_by(season, team) %>%
     summarise(wins = sum(won), .groups = "drop")
 }
 
@@ -150,9 +150,9 @@ compute_team_wins <- function(start_year, end_year) {
 # NOTE: ESPN only publishes season QBR for qualified quarterbacks, so backups and
 # part time starters will be missing here and receive zero downstream
 load_qbr_ratings <- function(start_year, end_year) {
-  load_espn_qbr(seasons = start_year:end_year, summary_type = "season") |>
-    filter(season_type == "Regular") |>
-    mutate(espn_id = as.character(player_id)) |>
+  load_espn_qbr(seasons = start_year:end_year, summary_type = "season") %>%
+    filter(season_type == "Regular") %>%
+    mutate(espn_id = as.character(player_id)) %>%
     select(season, espn_id, QBR = qbr_total)
 }
 
@@ -186,15 +186,15 @@ build_player_season_stats <- function(start_year, end_year) {
   qbr_ratings <- load_qbr_ratings(start_year, end_year)
   team_wins <- compute_team_wins(start_year, end_year)
 
-  season_stats |>
+  season_stats %>%
     # Limiting the pool to fantasy relevant offensive positions
-    filter(position %in% c("QB", "RB", "FB", "WR", "TE")) |>
+    filter(position %in% c("QB", "RB", "FB", "WR", "TE")) %>%
     # Attaching player metadata, quarterback ratings, and team win totals
-    left_join(player_metadata, by = c("player_id" = "gsis_id", "season" = "season")) |>
-    left_join(qbr_ratings, by = c("espn_id" = "espn_id", "season" = "season")) |>
-    left_join(team_wins, by = c("recent_team" = "team", "season" = "season")) |>
+    left_join(player_metadata, by = c("player_id" = "gsis_id", "season" = "season")) %>%
+    left_join(qbr_ratings, by = c("espn_id" = "espn_id", "season" = "season")) %>%
+    left_join(team_wins, by = c("recent_team" = "team", "season" = "season")) %>%
     # Computing age at the end of the calendar year to match the legacy PFR convention
-    mutate(Age = floor(as.numeric(make_date(season, 12, 31) - birth_date) / 365.25)) |>
+    mutate(Age = floor(as.numeric(make_date(season, 12, 31) - birth_date) / 365.25)) %>%
     # Building the rate and efficiency stats the legacy pipeline sourced directly from PFR
     mutate(
       dropbacks = attempts + sacks_suffered,
@@ -225,7 +225,7 @@ build_player_season_stats <- function(start_year, end_year) {
       # component the total-yards metrics above conflate with yards after the catch
       passing_adot = if_else(attempts > 0, passing_air_yards / attempts, 0),
       Rate = if_else(attempts > 0, compute_passer_rating(completions, attempts, passing_yards, passing_tds, passing_interceptions), 0)
-    ) |>
+    ) %>%
     # Renaming to the column names the downstream feature engineering and models expect
     transmute(
       player_id,
@@ -244,6 +244,7 @@ build_player_season_stats <- function(start_year, end_year) {
       receiving_yds_rec,
       receiving_td = receiving_tds,
       receiving_1D = receiving_first_downs,
+      receiving_epa,
       receiving_epa_per_target,
       receiving_rec_g,
       receiving_y_g,
@@ -260,6 +261,7 @@ build_player_season_stats <- function(start_year, end_year) {
       rush_yds = rushing_yards,
       rush_td = rushing_tds,
       rush_1D = rushing_first_downs,
+      rushing_epa,
       rush_epa_per_att,
       rush_yds_att,
       rush_yds_game,
@@ -274,6 +276,7 @@ build_player_season_stats <- function(start_year, end_year) {
       passing_int = passing_interceptions,
       passing_int_pct,
       passing_1D = passing_first_downs,
+      passing_epa,
       passing_epa_per_att,
       passing_yards_att,
       passing_avg_yards_att,
@@ -291,9 +294,9 @@ build_player_season_stats <- function(start_year, end_year) {
       passing_cpoe,
       pacr,
       wins
-    ) |>
+    ) %>%
     # Undrafted players receive a draft position value beyond the final pick of the draft
-    mutate(draft_number = replace_na(draft_number, 300)) |>
+    mutate(draft_number = replace_na(draft_number, 300)) %>%
     # Filling missing stat values with zero to match the legacy dataset convention
     # Entry year stays missing where unknown so downstream career logic can fall back gracefully
     mutate(across(where(is.numeric) & !any_of("entry_year"), fill_missing_with_zero))

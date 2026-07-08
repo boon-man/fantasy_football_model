@@ -31,15 +31,15 @@ theme_nfl <- function() {
 
 # Helper to add a signed residual column, defined as predicted minus actual
 add_prediction_diff <- function(pred_df) {
-  pred_df |>
+  pred_df %>%
     mutate(prediction_diff = Predicted - Actual)
 }
 
 # Helper to pull the largest absolute residuals and build their callout labels
 # The year shown is the season being predicted rather than the feature season
 build_outlier_labels <- function(pred_df, top_n) {
-  pred_df |>
-    slice_max(abs(prediction_diff), n = top_n, with_ties = FALSE) |>
+  pred_df %>%
+    slice_max(abs(prediction_diff), n = top_n, with_ties = FALSE) %>%
     mutate(label = paste0(Player, " (", lubridate::year(Year) + 1, ")"))
 }
 
@@ -194,15 +194,15 @@ plot_decile_calib <- function(pred_df, pos_label = "", n_deciles = 10, nudge_y =
   # Binning into prediction deciles and averaging within each bin
   # Positive pct labels mean actuals ran above the model (underprediction)
   decile_calib <-
-    pred_df |>
-    mutate(pred_decile = ntile(Predicted, n_deciles)) |>
-    group_by(pred_decile) |>
+    pred_df %>%
+    mutate(pred_decile = ntile(Predicted, n_deciles)) %>%
+    group_by(pred_decile) %>%
     summarise(
       mean_pred = mean(Predicted),
       mean_actual = mean(Actual),
       .groups = "drop"
-    ) |>
-    mutate(pct_diff = (mean_actual - mean_pred) / mean_actual * 100) |>
+    ) %>%
+    mutate(pct_diff = (mean_actual - mean_pred) / mean_actual * 100) %>%
     mutate(diff_label = paste0(round(pct_diff, 1), "%")) %>%
     filter(pred_decile >= decile_cutoff)
 

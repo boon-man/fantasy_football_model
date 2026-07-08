@@ -28,7 +28,7 @@ Scripts run in numbered order, passing data between stages via CSVs in `data/` (
 
 ### functions.R
 
-Shared home for data intake (nflverse functions, new code uses `|>` pipes) and cleaning helpers (`clean_player_name`). The legacy PFR functions (`scrapeData`, `clean_traded_players`) remain only for the archived scripts in `tests/` — do not use them for new data pulls. `02_combine_projections.R` still redefines its own `clean_player_name`; remaining modeling/plot functions in `01` are a standing TODO to consolidate.
+Shared home for data intake (nflverse functions) and cleaning helpers (`clean_player_name`). Use the magrittr `%>%` pipe throughout (available via `tidyverse` in `00_globals.R`) — the native `|>` pipe was retired from this repo. The legacy PFR functions (`scrapeData`, `clean_traded_players`) remain only for the archived scripts in `tests/` — do not use them for new data pulls. `02_combine_projections.R` still redefines its own `clean_player_name`; remaining modeling/plot functions in `01` are a standing TODO to consolidate.
 
 ## `tests/` Directory
 

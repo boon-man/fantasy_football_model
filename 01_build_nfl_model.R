@@ -30,8 +30,8 @@ RANDOM_STATE <- 7542   # Seed threaded into train_position_model; change it (e.g
 # DONE: Re-run the estimate_vorp_zscore_blend script for 2026
 # DONE: Create plot to visualize the breakouts of player tiers in 03_
 # DONE: Adjust color palette in career trajectories so that it is directly gradient from best-worst
-# TODO: Adjust so that dampening happens only when creating final projection, un-do the dampening on import
-# TODO: Refine the expert vs model rank visual (minor gridlines every 5 steps, improved annotation placement)
+# DONE: Adjust so that dampening happens only when creating final projection, un-do the dampening on import
+# DONE: Refine the expert vs model rank visual (minor gridlines every 5 steps, improved annotation placement)
 
 
 # Function to train the XGBoost model for a specific position
@@ -774,16 +774,16 @@ if (SKIP_DATA_LOAD) {
 # The legacy traded player cleanup and duplicate name fixes are no longer needed,
 # nflverse season summaries arrive pre-aggregated and keyed by the GSIS player id
 combined <-
-  player_stats_final |>
+  player_stats_final %>%
   mutate(points = (receiving_td * 6) + (receiving_yds * .1) + (Rec * PPR_MULT) +
            (rush_td * 6) + (rush_yds * .1) +
            (passing_yards * .04) + (passing_td * 4) -
-           (rush_fbl * 2) - (passing_int * 2)) |>
-  arrange(player_id, Year) |>
-  group_by(player_id) |>
-  mutate(Pos = last(Pos)) |> # Each player's most recent position will be used for their historical performance eval
-  ungroup() |>
-  mutate(Year = as.Date(as.yearmon(Year))) |>
+           (rush_fbl * 2) - (passing_int * 2)) %>%
+  arrange(player_id, Year) %>%
+  group_by(player_id) %>%
+  mutate(Pos = last(Pos)) %>% # Each player's most recent position will be used for their historical performance eval
+  ungroup() %>%
+  mutate(Year = as.Date(as.yearmon(Year))) %>%
   filter(Pos %in% c('WR', 'TE', 'RB', 'QB'))
 
 # Trailing index of a player's best season up to (and including) each row.
@@ -925,6 +925,8 @@ combined <-
     qb_yards_3yr = rollapplyr(qb_yards, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     avg_qbr_3yr = rollapplyr(QBR, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_epa_per_att_3yr = rollapplyr(passing_epa_per_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    # Season-total passing EPA - a volume-inclusive production signal complementing the per-attempt rate
+    passing_epa_3yr = rollapplyr(passing_epa, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     passing_adj_net_yards_att_3yr = rollapplyr(passing_adj_net_yards_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     # Trailing 3yr OLS slope of ANY/A - a QB efficiency-trajectory signal (rising vs. fading arm/decisions)
     passing_adj_net_yards_att_trend_3yr = rollapplyr(passing_adj_net_yards_att, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
@@ -950,8 +952,12 @@ combined <-
     rush_epa_per_att_3yr = rollapplyr(rush_epa_per_att, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     # Trailing 3yr OLS slope of rushing EPA/att - a rushing-efficiency trajectory signal (athletic gain/decline)
     rush_epa_per_att_trend_3yr = rollapplyr(rush_epa_per_att, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
+    # Season-total rushing EPA - a volume-inclusive production signal complementing the per-attempt rate
+    rushing_epa_3yr = rollapplyr(rushing_epa, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     touches_3yr = rollapplyr(touches, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     receiving_epa_per_target_3yr = rollapplyr(receiving_epa_per_target, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
+    # Season-total receiving EPA - a volume-inclusive production signal complementing the per-target rate
+    receiving_epa_3yr = rollapplyr(receiving_epa, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     receiving_yards_target_3yr = rollapplyr(receiving_yards_target, width = 3, FUN = mean, fill = NA, align = "right", partial = TRUE),
     # Trailing 3yr OLS slope of yards/target - a receiving-efficiency trajectory signal (separation/YAC gain/decline)
     receiving_yards_target_trend_3yr = rollapplyr(receiving_yards_target, width = 3, FUN = trailing_slope, fill = NA, align = "right", partial = TRUE),
@@ -1065,6 +1071,7 @@ qb_features <- c(
   "passing_adj_net_yards_att", "passing_adj_net_yards_att_3yr", "passing_adj_net_yards_att_trend_3yr", "passing_adot", "passing_adot_3yr",
   "passing_att", "passing_avg_yards_att", "passing_comp", "passing_comp_pct",
   "passing_cpoe", "passing_cpoe_3yr", "passing_epa_per_att", "passing_epa_per_att_3yr",
+  "passing_epa", "passing_epa_3yr", "rushing_epa", "rushing_epa_3yr",
   "passing_int", "passing_int_pct", "passing_net_yards_att", "passing_sack",
   "passing_td", "passing_td_pct", "passing_yards", "passing_yards_att",
   "passing_yards_att_3yr", "passing_yards_comp", "passing_yards_game", "points",
@@ -1094,6 +1101,7 @@ rb_features <- c(
   "points_pct_change", "points_per_target", "points_per_touch", "points_trend_3yr",
   "points_vs_3yr_avg", "pos_rank", "pos_rank_last_year", "prior_injury_flag",
   "receiving_1D", "receiving_air_yards", "receiving_epa_per_target", "receiving_epa_per_target_3yr",
+  "receiving_epa", "receiving_epa_3yr", "rushing_epa", "rushing_epa_3yr",
   "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_y_g",
   "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr", "receiving_yds",
   "receiving_yds_rec", "rush_1D", "rush_att", "rush_attempts_per_game",
@@ -1124,6 +1132,7 @@ wr_features <- c(
   "points_vs_3yr_avg", "Pos", "pos_rank", "pos_rank_last_year",
   "prior_injury_flag", "racr", "racr_3yr", "Rec",
   "receiving_1D", "receiving_air_yards", "receiving_epa_per_target", "receiving_epa_per_target_3yr",
+  "receiving_epa", "receiving_epa_3yr", "rushing_epa", "rushing_epa_3yr",
   "receiving_rec_g", "receiving_td", "receiving_td_rate", "receiving_y_g",
   "receiving_yards_after_catch", "receiving_yards_target", "receiving_yards_target_3yr", "receiving_yards_target_trend_3yr", "receiving_yds",
   "receiving_yds_rec", "rush_att", "rush_epa_per_att", "rush_epa_per_att_3yr",
