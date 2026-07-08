@@ -605,18 +605,13 @@ plot_predicted_trajectories <- function(combined_df, pred_df, pos_group = "QB", 
     slice_max(Year, n = 1, with_ties = FALSE) %>%
     ungroup()
 
-  # Coastal Breeze gradient: map the player ordering (highest predicted -> lowest) onto a dark-to-light
-  # blue ramp, so the top player is the darkest hue and the bottom player the lightest. Uses the blue
-  # tones of the coastal palette; the teal/gray members are dropped so the gradient lightens
-  # monotonically instead of wobbling between hues.
-  coastal_ramp <- colorRampPalette(c(
-    "#2C5985",  # Dark steel blue    (darkest  -> highest predicted player)
-    "#457C99",  # Dusty blue
-    "#639DB8",  # Muted sky blue
-    "#87BFD6",  # Cooler blue
-    "#A0C5CF"   # Muted powder blue  (lightest -> lowest predicted player)
-  ))
-  gradient_colors <- setNames(coastal_ramp(length(sampled_players)), sampled_players)
+  # Hiroshige gradient: map the player ordering (highest predicted -> lowest) onto the MetBrewer
+  # "Hiroshige" palette, interpolated continuously across however many players the tier holds, so the
+  # top-predicted player anchors one end of the ramp and the bottom-predicted player the other.
+  gradient_colors <- setNames(
+    rev(met.brewer("Hiroshige", n = length(sampled_players), type = "continuous")),
+    sampled_players
+  )
 
   ggplot(plot_df, aes(x = Year, y = points, color = Player, group = Player)) +
     # Solid historical trajectory, then a dashed leg into the prediction year
@@ -741,7 +736,7 @@ plot_rank_movement <- function(combined_df, pred_df, pos_group = "QB", tier = 1,
       limits = c(0.4, 2.6)
     ) +
     scale_color_manual(
-      values = c(Riser = "#1F7A4D", Dropoff = "#9E2350", Flat = "#666666")
+      values = c(Riser = "#418161", Dropoff = "#892938", Flat = "#666666")
     ) +
     labs(
       title = paste0(pos_group, " Projected Rank Movement — Last Season vs ", PRED_YEAR, " Prediction"),
