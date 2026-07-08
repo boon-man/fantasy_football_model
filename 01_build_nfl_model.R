@@ -10,8 +10,8 @@ source("functions.R")   # Loading shared cleaning and nflverse data intake funct
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
-SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 7542   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
+RANDOM_STATE <- 329   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -180,12 +180,12 @@ train_position_model <- function(df, position, feature_cols,
   opt_result <- BayesianOptimization(
     FUN = xgb_cv_bayes,
     bounds = list(
-      max_depth = c(3, 8),
-      eta = c(0.01, 0.2),
+      max_depth = c(2, 8),
+      eta = c(0.005, 0.2),
       gamma = c(0, 0.15),
       min_child_weight = c(1, 12),
-      subsample = c(0.6, 1.0),
-      colsample_bytree = c(0.6, 0.95),
+      subsample = c(0.5, 1.0),
+      colsample_bytree = c(0.5, 0.95),
       lambda = c(0, 10),    # L2 regularization
       alpha = c(0, 3)       # L1 regularization
     ),
@@ -231,6 +231,9 @@ train_position_model <- function(df, position, feature_cols,
   # cv_final$best_iteration, which is NULL/absent in some xgboost versions and yields a
   # length-zero nrounds. This matches the field the tuning loop already relies on.
   best_nrounds <- which.min(cv_final$evaluation_log$test_rmse_mean)
+  # Print the CV-chosen tree count against the ceiling - if it sits near max_nrounds the model is
+  # being truncated (eta too low / ceiling too tight), not converging on its own
+  cat("Best nrounds for", position, "model:", best_nrounds, "of", max_nrounds, "max\n")
 
   # Fit on the full training split with the CV-chosen tree count - no watchlist, no early stopping,
   # so the test set plays no role in selecting the model
