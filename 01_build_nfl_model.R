@@ -10,8 +10,8 @@ source("functions.R")   # Loading shared cleaning and nflverse data intake funct
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
-SKIP_DATA_LOAD <- FALSE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 329   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
+SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
+RANDOM_STATE <- 12345   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
 
 # DONE: Test out the new "Tier 1" feature additions from Claude
 # DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
@@ -501,7 +501,13 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     }
     resid <- x - smooth(x)                    # center: above/below typical for the level
     local_scale <- smooth(abs(resid))         # scale: typical |residual| at the level (~ conditional sd)
-    floor_scale <- 0.05 * median(abs(resid), na.rm = TRUE)
+    # Floor the denominator at HALF the typical |residual|. The |residual| smooth collapses toward
+    # zero at the sparse top of the projection range (few neighbours up there), which turns an
+    # ordinary residual into an enormous studentized value: the #1 RB once scored a ceiling_index
+    # of -12 off a residual of -0.02 against a median |residual| of 0.03, and that lone outlier
+    # then inflated the position's sd and compressed everyone else toward 100. A 5% floor bounded
+    # nothing useful - it allowed a denominator 20x tighter than typical.
+    floor_scale <- 0.50 * median(abs(resid), na.rm = TRUE)
     if (!is.finite(floor_scale) || floor_scale <= 0) floor_scale <- 1
     local_scale <- ifelse(is.finite(local_scale) & local_scale > floor_scale, local_scale, floor_scale)
     resid / local_scale

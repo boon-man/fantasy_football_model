@@ -40,10 +40,17 @@ VORP_CUTOFF <- 0.66
 # z-scores get thrown off due to large expert projections
 # Generally, WRs are going to be the most valuable position by ADP
 # rankings should roughly reflect expected positional scarcity when drafting
+# Underdog
 QB_DAMP <- 0.6
-RB_DAMP <- 1.1
+RB_DAMP <- 1.05
 TE_DAMP <- 0.85
 WR_DAMP <- 1.2
+
+# Draftkings
+# QB_DAMP <- 0.65
+# RB_DAMP <- 1.15
+# TE_DAMP <- 0.80
+# WR_DAMP <- 1.15
 
 # Function for estimating optimal K value
 plot_wss_elbow <- function(player_df, pos = NULL, max_k = 25) {
@@ -452,17 +459,17 @@ tier_df <-
 ## Quarterbacks
 plot_wss_elbow(tier_df, pos = "QB", max_k = 15)
 
-qb_df <- assign_positional_tiers(tier_df, pos = "QB", k = 8)
+qb_df <- assign_positional_tiers(tier_df, pos = "QB", k = 7)
 
 ## Runningbacks
 plot_wss_elbow(tier_df, pos = "RB", max_k = 15)
 
-rb_df <- assign_positional_tiers(tier_df, pos = "RB", k = 7)
+rb_df <- assign_positional_tiers(tier_df, pos = "RB", k = 8)
 
 ## Wide Receivers
 plot_wss_elbow(tier_df, pos = "WR", max_k = 15)
 
-wr_df <- assign_positional_tiers(tier_df, pos = "WR", k = 6)
+wr_df <- assign_positional_tiers(tier_df, pos = "WR", k = 7)
 
 ## Tight Ends
 plot_wss_elbow(tier_df, pos = "TE", max_k = 15)
@@ -472,9 +479,9 @@ te_df <- assign_positional_tiers(tier_df, pos = "TE", k = 6)
 # Combine all positional tiers into a single dataframe
 final_df <- bind_rows(list(qb_df, rb_df, wr_df, te_df)) %>%
   arrange(desc(Relative_Value), Tier, Pos_Tier) %>%
-  select(player_id, Player, Pos, Model_Prediction, FantasyPros_Prediction,
-         Final_Projection, Floor, Ceiling, ceiling_index, floor_index, upside_index,
-         FP_Pos_Ranking, Pos_Ranking, Overall_Ranking,
+  select(Player, Pos, Model_Prediction, FantasyPros_Prediction,
+         Final_Projection, Floor, Ceiling, floor_index, ceiling_index, upside_index,
+         Pos_Ranking, Overall_Ranking,
          Relative_Value, Tier, Pos_Tier)
 
 # Inspect each position's tier structure (projection vs positional rank, colored by tier)

@@ -301,3 +301,260 @@ build_player_season_stats <- function(start_year, end_year) {
     # Entry year stays missing where unknown so downstream career logic can fall back gracefully
     mutate(across(where(is.numeric) & !any_of("entry_year"), fill_missing_with_zero))
 }
+
+##############################################################################
+### === FANTASYPROS PROJECTIONS INTAKE === #
+### Consumed by 02_combine_projections.R. load_fp_projections() is the entry point; everything
+### above it is machinery. The manual-CSV reader is kept alongside the scraper deliberately: it is
+### both the automatic per-position fallback and the way back to hand-exported projections if the
+### scrape ever stops working (see SKIP_FP_SCRAPE in 02).
+
+# Minimum rows a scraped position must return to be trusted. Anonymous (or expired-login)
+# requests come back fenced to 10 players, so anything at or below this means "not logged in".
+FP_MIN_ROWS <- 20
+
+##############################################################################
+### FantasyPros projections intake
+###
+### FantasyPros fences the full projections table behind a logged-in account, serving anonymous
+### requests a table truncated to 10 players. Three things are worth knowing before changing any
+### of this, each established by testing (see tests/fp_scrape_auth_test.R):
+###
+###   - There is no CSV endpoint. The site's own "download" link is generated client-side by
+###     window.exportTableToCSV, which serializes the rendered DOM table - so the manual exports
+###     in data/fp_raw/ and this scrape read the very same table, which is why they agree.
+###   - The fence is server-side row truncation, not user-agent filtering. Sending a browser
+###     user-agent (as an older scraper here did) changes nothing; only being logged in does.
+###   - Logging in from R is impossible: the form mints a reCAPTCHA v3 token via
+###     grecaptcha.execute() before posting, and a POST without one is rejected as bad
+###     credentials even when the credentials are correct.
+###
+### Hence headless Chrome against a dedicated, persistent profile: log in by hand once (a human
+### clears reCAPTCHA v3 without friction), and Chrome keeps the cookie jar in the profile
+### directory so later runs are already authenticated. No password or cookie is stored by this
+### repo. When the scrape fails or comes back fenced, each position falls back to its manual CSV.
+###
+### FIRST-TIME (and whenever the login lapses) SETUP - run in a terminal, log in, close the window:
+###   open -na "Google Chrome" --args --user-data-dir=~/.fp_chrome_profile https://secure.fantasypros.com/accounts/login/
+FP_CHROME_PROFILE <- path.expand("~/.fp_chrome_profile")
+
+fp_projection_url <- function(position, scoring = SCORING_TYPE) {
+  sprintf("https://www.fantasypros.com/nfl/projections/%s.php?week=draft&scoring=%s",
+          tolower(position), toupper(scoring))
+}
+
+# Chrome permits one process per profile directory, enforced with a SingletonLock symlink naming
+# "<host>-<pid>". Launching against a locked profile surfaces as an opaque chromote "Cannot find an
+# available port", so this reports the real cause - and clears the lock when it is merely stale,
+# which a crashed or killed browser leaves behind and which would otherwise block every later run.
+assert_chrome_profile_ready <- function(profile_dir = FP_CHROME_PROFILE) {
+  # Checking existence first and refusing to continue without it: handed a --user-data-dir it
+  # cannot use, Chrome quietly falls back to the DEFAULT profile - so a typo here would otherwise
+  # drive the user's everyday browser session instead of this dedicated one
+  if (!dir.exists(profile_dir)) {
+    stop(sprintf(paste0("No Chrome profile at %s. Run the one-time login first:\n",
+                        '  open -na "Google Chrome" --args --user-data-dir=%s %s\n',
+                        "Log in, then close that window."),
+                 profile_dir, shQuote(profile_dir),
+                 "https://secure.fantasypros.com/accounts/login/"), call. = FALSE)
+  }
+
+  # Sys.readlink gives NA for a missing path and "" for a non-symlink; neither is a live lock
+  lock_target <- Sys.readlink(file.path(profile_dir, "SingletonLock"))
+  if (is.na(lock_target) || !nzchar(lock_target)) return(invisible(TRUE))
+
+  locking_pid <- str_extract(lock_target, "[0-9]+$")
+  if (is.na(locking_pid)) return(invisible(TRUE))
+
+  # ps exits 0 only when the pid exists
+  if (system2("ps", c("-p", locking_pid), stdout = FALSE, stderr = FALSE) == 0) {
+    stop(sprintf(paste0("Chrome (pid %s) is already using %s.\n",
+                        "Close that window - most likely the manual login window - then retry."),
+                 locking_pid, profile_dir), call. = FALSE)
+  }
+
+  message("Clearing a stale Chrome profile lock left by pid ", locking_pid, ".")
+  unlink(file.path(profile_dir, c("SingletonLock", "SingletonCookie", "SingletonSocket")))
+  invisible(TRUE)
+}
+
+# Chrome reports a page loaded before the table is necessarily populated, so waiting on a row
+# count rather than the load event is what makes this reliable
+wait_for_projection_rows <- function(session, min_rows = FP_MIN_ROWS, timeout_sec = 20) {
+  deadline <- Sys.time() + timeout_sec
+  repeat {
+    n_rows <- session$Runtime$evaluate(
+      "document.querySelectorAll('#data tbody tr').length"
+    )$result$value
+
+    if (n_rows >= min_rows || Sys.time() > deadline) return(n_rows)
+    Sys.sleep(0.5)
+  }
+}
+
+# Parsing table#data into the three-column contract the blend below expects: Player (chr),
+# Pos (upper), Projected_Points (chr - the caller strips formatting and coerces).
+parse_fp_projections_html <- function(html_text, position) {
+  # Selecting by id: the page also carries table#experts (the per-expert breakdown)
+  projections_table <- html_element(read_html(html_text), "table#data")
+  if (inherits(projections_table, "xml_missing")) {
+    stop(sprintf("No table#data on the %s page - the page layout changed.", toupper(position)),
+         call. = FALSE)
+  }
+
+  # The thead holds two rows: a stat-group banner of <td> cells (PASSING / RUSHING / MISC) and the
+  # real header row of <th> cells. Selecting th skips the banner - which is the DOM origin of the
+  # spacer row that shows up in the manual CSV exports.
+  col_names <-
+    projections_table %>%
+    html_elements("thead tr th") %>%
+    html_text2() %>%
+    str_trim() %>%
+    str_to_upper()
+
+  if (!"FPTS" %in% col_names) {
+    stop(sprintf("No FPTS column in the %s header row: %s", toupper(position),
+                 paste(col_names, collapse = ", ")), call. = FALSE)
+  }
+  # Located by position, taking the last match: the header repeats YDS/TDS/ATT across the rushing
+  # and receiving stat groups, so the names are ambiguous
+  fpts_col <- last(which(col_names == "FPTS"))
+
+  rows <- html_elements(projections_table, "tbody tr")
+
+  # The player cell is anchor text followed by a bare team abbrev ("<a>Josh Allen</a> BUF"), so the
+  # name is read from the anchor's fp-player-name attribute rather than regexing the abbrev off.
+  # Falling back to the cell text in case a row ever ships without the anchor.
+  player_links <- html_element(rows, "a.player-name")
+  tibble(
+    Player = coalesce(html_attr(player_links, "fp-player-name"), html_text2(player_links)),
+    Projected_Points = map_chr(rows, nth_cell_text, index = fpts_col),
+    Pos = toupper(position)
+  ) %>%
+    mutate(Player = str_squish(Player)) %>%
+    select(Player, Pos, Projected_Points)
+}
+
+# Pulling one cell out of a row by column position
+nth_cell_text <- function(row, index) {
+  html_text2(html_elements(row, "td")[[index]])
+}
+
+# Scraping every position in ONE browser session - launching Chrome is the expensive part, so it
+# is paid once rather than per position. Returns a named list keyed by position so the caller can
+# fall back per position rather than all-or-nothing.
+scrape_fp_projections <- function(positions, scoring = SCORING_TYPE, min_rows = FP_MIN_ROWS) {
+  assert_chrome_profile_ready()
+
+  chrome <- chromote::Chrome$new(
+    args = c(chromote::get_chrome_args(), paste0("--user-data-dir=", FP_CHROME_PROFILE))
+  )
+  browser_session <- chromote::Chromote$new(browser = chrome)$new_session()
+  on.exit(browser_session$parent$close(), add = TRUE)
+
+  scrape_one <- function(position) {
+    browser_session$Page$navigate(fp_projection_url(position, scoring))
+    browser_session$Page$loadEventFired()
+    n_rows <- wait_for_projection_rows(browser_session, min_rows = min_rows)
+
+    # Below the threshold means the login has lapsed - returning NULL so the caller falls back
+    if (n_rows < min_rows) {
+      warning(sprintf("FantasyPros %s returned only %d rows - the Chrome login has likely lapsed.",
+                      toupper(position), n_rows), call. = FALSE)
+      return(NULL)
+    }
+
+    message(sprintf("Scraped %s: %d rows", toupper(position), n_rows))
+    parse_fp_projections_html(
+      browser_session$Runtime$evaluate("document.documentElement.outerHTML")$result$value,
+      position
+    )
+  }
+
+  set_names(lapply(positions, scrape_one), positions)
+}
+
+# Reading the manually exported FantasyPros projections for each position - the fallback path,
+# used when SKIP_FP_SCRAPE is TRUE or a position's scrape came back fenced/failed.
+# To refresh:
+#   1. Log in to fantasypros.com, open the projections page for each position, and set the
+#      scoring dropdown to match SCORING_TYPE
+#   2. Click the CSV/Excel download link on each page
+#   3. Drop the downloads - keeping their FantasyPros filenames, e.g.
+#      FantasyPros_Fantasy_Football_Projections_RB.csv - into data/fp_raw/<SCORING_TYPE>/, i.e.
+#      data/fp_raw/PPR/, data/fp_raw/HALF/ or data/fp_raw/STANDARD/
+# QB projections are scoring-agnostic (no receptions - FPTS is identical under HALF/PPR/none),
+# so the same QB export can simply be copied into each scoring folder.
+read_fp_projections_csv <- function(position, scoring = "HALF") {
+  # Exports live in one subfolder per SCORING_TYPE
+  dir <- file.path("data/fp_raw", toupper(scoring))
+
+  # Match FantasyPros' download name for this position. Globbing rather than requiring an exact
+  # filename so a re-download that lands as "..._RB (1).csv" is still picked up - newest wins.
+  pattern <- paste0("^FantasyPros_Fantasy_Football_Projections_", toupper(position), "\\b.*\\.csv$")
+  matches <- list.files(dir, pattern = pattern, full.names = TRUE)
+  if (length(matches) == 0) {
+    stop(sprintf("No FantasyPros %s export found in %s/ (expected FantasyPros_Fantasy_Football_Projections_%s.csv) - see the export steps above read_fp_projections_csv().",
+                 toupper(position), dir, toupper(position)), call. = FALSE)
+  }
+  path <- matches[which.max(file.mtime(matches))]
+
+  # Read as text with no header. The export ships duplicate column names (YDS/TDS/ATT appear once
+  # for rushing and again for receiving), which read_csv would otherwise mangle, and row 2 is a
+  # spacer row - a non-breaking space plus empty fields - left over from the stat-group header
+  # row of the HTML table. Column count varies by position, so FPTS is located by name.
+  # The spacer row and the file's trailing blank line are both short, which read_csv flags; every
+  # column is read as text, so a field-count mismatch is the only problem it can raise and both
+  # offenders are dropped below - hence suppressing rather than surfacing the warning.
+  raw <- suppressWarnings(
+    read_csv(path, col_names = FALSE, col_types = cols(.default = "c"), progress = FALSE)
+  )
+
+  col_names <- str_to_upper(str_trim(unlist(raw[1, ])))
+  if (!"FPTS" %in% col_names) {
+    stop(sprintf("No FPTS column in the header row of %s - is this a FantasyPros projections export?", path),
+         call. = FALSE)
+  }
+
+  # Drop the header row, then the spacer row falls out on its empty points cell. FantasyPros
+  # ships Team in its own column, so the player cell needs no team-abbrev stripping.
+  raw[-1, ] %>%
+    select(Player = 1, Projected_Points = all_of(last(which(col_names == "FPTS")))) %>%
+    filter(!is.na(Projected_Points)) %>%
+    mutate(
+      Player = str_squish(Player),
+      Pos = toupper(position)
+    ) %>%
+    select(Player, Pos, Projected_Points)
+}
+
+# Loading every position's projections, scraping by default and falling back to the manual CSV
+# export per position - so one lapsed position (or one page that failed to render) does not cost
+# the whole run. Returns the stacked three-column frame the blend consumes.
+#
+# `use_scrape` is passed in rather than read from a global: the caller (02) owns the SKIP_FP_SCRAPE
+# toggle, and this file should not reach into a script that sources it.
+load_fp_projections <- function(positions, scoring = SCORING_TYPE, use_scrape = TRUE) {
+  scraped <- if (!use_scrape) {
+    set_names(vector("list", length(positions)), positions)
+  } else {
+    # A hard failure here (no Chrome, no profile) should not be fatal - every position simply
+    # falls back to its export
+    tryCatch(
+      scrape_fp_projections(positions, scoring),
+      error = function(e) {
+        warning("FantasyPros scrape failed (", conditionMessage(e),
+                ") - falling back to the manual CSV exports.", call. = FALSE)
+        set_names(vector("list", length(positions)), positions)
+      }
+    )
+  }
+
+  load_one <- function(position) {
+    if (!is.null(scraped[[position]])) return(scraped[[position]])
+    message("Reading the manual ", toupper(position), " export from data/fp_raw/.")
+    read_fp_projections_csv(position, scoring)
+  }
+
+  bind_rows(lapply(positions, load_one))
+}

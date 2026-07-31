@@ -4,6 +4,7 @@
 # Defining Variables, ensuring global variables are read in
 # 00_globals.R loads all package dependencies for the pipeline
 source("00_globals.R")
+source("functions.R")       # FantasyPros projection intake (scrape + manual-export fallback)
 source("evaluate_model.R")  # Loading the model performance diagnostic plots
 positions <- c("rb", "qb", "wr", "te")
 
@@ -15,50 +16,10 @@ PROJ_DAMP        <- 0.95  # Dampening factor for expert projections (applied in 
 QB_PENALTY_FACTOR <- 0.85  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (rookies, players that were injured all of last season)
 
-# Scraping FantasyPros projections for each position.
-# FantasyPros intermittently answers bare user-agents (and rapid-fire requests) with a
-# truncated ~10-row "preview" of the projections table, so we send a browser user-agent and
-# re-request with a short back-off until the full position list comes back (min_rows guard).
-scrape_fp_projections <- function(position, scoring = "HALF", min_rows = 20, max_tries = 4) {
-  url <- paste0("https://www.fantasypros.com/nfl/projections/", position, ".php?week=draft&scoring=", scoring, "&week=draft")
+## Set TRUE to skip the FantasyPros scrape and read the manual CSV exports instead, mirroring
+## SKIP_DATA_LOAD in 01_build_nfl_model.R. Useful when offline or when the Chrome login has lapsed.
+SKIP_FP_SCRAPE <- FALSE
 
-  # One request -> parsed projections table. Reading the response text through a browser
-  # user-agent avoids the stripped-down table rvest's default agent sometimes receives.
-  fetch_once <- function() {
-    resp <- GET(
-      url,
-      user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
-      add_headers("Accept-Language" = "en-US,en;q=0.9")
-    )
-    read_html(content(resp, as = "text", encoding = "UTF-8")) %>%
-      html_node("table") %>%
-      html_table(fill = TRUE)
-  }
-
-  # Retry while the table looks truncated (the preview table only carries ~10 players)
-  table <- fetch_once()
-  tries <- 1
-  while (nrow(table) < min_rows && tries < max_tries) {
-    Sys.sleep(3)
-    table <- fetch_once()
-    tries <- tries + 1
-  }
-  if (nrow(table) < min_rows) {
-    warning(sprintf("FantasyPros %s returned only %d rows after %d tries", position, nrow(table), tries))
-  }
-
-  table <- table %>%
-    rename_with(~ str_trim(.x)) %>%
-    rename(Player = 1, Projected_Points = ncol(.)) %>%
-    mutate(
-      Player = str_remove(Player, "\\s+[A-Z]{2,3}$"),  # Remove team abbrev
-      Player = str_squish(Player),
-      Pos = toupper(position)
-    ) %>%
-    select(Player, Pos, Projected_Points)
-
-  return(table)
-}
 
 # Function for cleaning up player name columns for joining projection data together
 clean_player_name <- function(name) {
@@ -154,16 +115,11 @@ plot_pred_vs_proj_dumbbell <- function(projection_df, pos_group = "QB", top_n = 
 # Reading in player prediction dataframe
 player_df <- read_csv(paste0("data/model_pred_", as.character(PRED_YEAR), "_", SCORING_TYPE, ".csv"))
 
-# Pulling in fantasypros predictions
-# Pausing between positions so FantasyPros doesn't throttle the back-to-back requests down
-# to its truncated preview table, then dropping the header/string rows from the points column
+# Pulling in the FantasyPros projections (scraped, or read from the manual exports), then
+# stripping the thousands separators the yardage columns carry
 fp_projections <-
-  bind_rows(lapply(positions, function(pos) {
-    out <- scrape_fp_projections(pos, scoring = SCORING_TYPE)
-    Sys.sleep(3)
-    out
-  })) %>%
-  mutate(Projected_Points = as.numeric(str_remove(Projected_Points, "[A-Za-z]"))) %>%
+  load_fp_projections(positions, scoring = SCORING_TYPE, use_scrape = !SKIP_FP_SCRAPE) %>%
+  mutate(Projected_Points = as.numeric(str_remove_all(Projected_Points, "[A-Za-z,]"))) %>%
   drop_na(Projected_Points)
 
 
