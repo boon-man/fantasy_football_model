@@ -11,28 +11,9 @@ source("evaluate_model.R")  # Loading the model performance diagnostic plots
 
 
 SKIP_DATA_LOAD <- TRUE  # Set to TRUE after the first refresh has cached data locally
-RANDOM_STATE <- 12345   # Seed threaded into train_position_model; change it (e.g. 1, 2, 3...) to generate alternate draft scenarios
-
-# DONE: Test out the new "Tier 1" feature additions from Claude
-# DONE: Simulated prediction ranges added via generate_prediction_intervals (bootstrap Floor/Ceiling)
-# DONE: Test out prediction range pipeline myself
-# DONE: Find material to read more about prediction range OOB methodology
-# DONE: Include metric to identify high-potential players
-# DONE: Random state added to train_position_model (RANDOM_STATE config knob) for alternate scenarios
-# DONE: Remove columns with high correlation?
-# DONE: Check to see if there are any other data sources to add in for additional model features
-# DONE: Check to see if there is a better open-source model available?
-# DONE: Add specific prediction/projection blends by position. Model splits QB:50%, RB:40%, WR:60%
-# DONE: Career trajectories plot polished (tier-aware sampling, dashed prediction leg, L-axes, gridlines)
-# DONE: Add in additional features to improve model performance
-# DONE: Fix the annotations in plots to have adjustable x and y points so that they can be custom for qb/rb/wr
-# DONE: Replace the projected trajectories plot in 02_ with a dumbell plot for last year/new year points
-# DONE: Re-run the estimate_vorp_zscore_blend script for 2026
-# DONE: Create plot to visualize the breakouts of player tiers in 03_
-# DONE: Adjust color palette in career trajectories so that it is directly gradient from best-worst
-# DONE: Adjust so that dampening happens only when creating final projection, un-do the dampening on import
-# DONE: Refine the expert vs model rank visual (minor gridlines every 5 steps, improved annotation placement)
-
+RANDOM_STATE <- 1432   # Seed threaded into train_position_model
+UPSIDE_BOTH_BONUS <- 0.05  # Extra credit in upside_index when the WEAKER of the two axes also clears 100
+UPSIDE_DEFICIT_WEIGHT <- 0.75  # Penalizer for players with disproportionately low floor or low ceiling relative to peers
 
 # Function to train the XGBoost model for a specific position
 #
@@ -328,25 +309,157 @@ predict_next_year <- function(model_object, pred_df) {
     arrange(desc(Predicted))
 }
 
-# Function to generate simulated floor/ceiling prediction intervals via a player-level bootstrap
+# Function to learn each player's lower and upper outcome spread from his features
 #
-# Reuses a trained model's tuned hyperparameters, pruned feature set, and tree count, so no
-# re-tuning happens. Each of n_bootstrap iterations draws players WITH replacement and replicates
-# every drawn player's rows by its draw count (a true cluster bootstrap), fits at a FIXED nrounds
-# (no early stopping), and predicts on the eval players - the spread of these refit predictions is
-# the epistemic (model) uncertainty. Out-of-bag (fitted, residual) pairs from every iteration
-# accumulate into ONE global pool, binned by fitted value so the aleatoric noise a player receives
-# is sized to his own projection level (heteroscedastic). The predictive sample per player is
-#   Predicted + epistemic deviation (refit spread, re-centered on Predicted) + binned OOB noise,
-# giving n_bootstrap * n_noise_draws Monte Carlo draws each. Bands are centered on the SAME
-# full-data model prediction carried downstream as `Predicted`, not the bootstrap ensemble mean.
-# n_bootstrap is kept modest (30) so the tails retain a little run-to-run variety - a fresh
-# RANDOM_STATE produces a genuinely fresh simulation.
-generate_prediction_intervals <- function(model_object, train_df, pred_df, position,
+# Quantile regression at 0.05 / 0.50 / 0.95. These only set the SHAPE of the simulated outcome
+# distribution - how far it reaches down versus up - and are never reported directly.
+#
+# Trained on the UNTRUNCATED frame: model_df's 35/25/15 points filter is a filter on the OUTCOME, so
+# it removes the bust seasons a floor exists to represent. A missing next season is a realized ZERO.
+#
+# Parameters
+# ----------
+# model_object : list
+#     A trained point model from train_position_model. Supplies the pruned feature set and tuned
+#     hyperparameters, so no second Bayesian search is needed for what is only a shape parameter.
+# alphas : numeric
+#     Quantile levels, ascending. Predictions are sorted row-wise afterwards because the fits are
+#     independent and cross for roughly 1 row in 2000.
+#
+# Returns
+# -------
+# list(alphas, models, features) - consumed by predict_shape().
+#
+# Notes
+# -----
+# nrounds is re-selected per alpha by CV, since the tree count minimising squared error is not the one
+# minimising pinball loss at 0.05. `quantile_alpha` must be passed INSIDE `params` - as a top-level
+# xgb.train argument it is silently ignored and every alpha returns the same model.
+#
+# Known quirk: points_next_year is lead(points, 1) over rows that exist only for seasons PLAYED, so a
+# player who misses a full year has his outcome read from two years ahead.
+train_shape_models <- function(model_object, train_df, position,
+                               alphas = c(0.05, 0.50, 0.95),
+                               max_nrounds = 1200,
+                               random_state = 62820) {
+  feature_cols <- model_object$features
+  best_params <- model_object$best_params
+
+  # Untruncated: keep the busts and treat a missing next season as a realized zero
+  pos_df <- train_df %>%
+    filter(
+      (position == "WR" & Pos %in% c("WR", "TE")) |
+        (position == "QB" & Pos == "QB") |
+        (position == "RB" & Pos %in% c("RB", "FB"))
+    ) %>%
+    filter(G > 0) %>%
+    mutate(outcome = coalesce(points_next_year, 0))
+
+  dtrain <- xgb.DMatrix(data = data.matrix(pos_df[, feature_cols, drop = FALSE]),
+                        label = pos_df$outcome)
+
+  base_params <- list(
+    objective = "reg:quantileerror",
+    eval_metric = "quantile",
+    tree_method = "hist",
+    max_depth = round(best_params[["max_depth"]]),
+    eta = best_params[["eta"]],
+    gamma = best_params[["gamma"]],
+    min_child_weight = best_params[["min_child_weight"]],
+    subsample = best_params[["subsample"]],
+    colsample_bytree = best_params[["colsample_bytree"]],
+    lambda = best_params[["lambda"]],
+    alpha = best_params[["alpha"]],
+    seed = random_state
+  )
+
+  models <- lapply(alphas, function(a) {
+    params_a <- c(base_params, list(quantile_alpha = a))
+    set.seed(random_state)
+    cv <- xgb.cv(params = params_a, data = dtrain, nrounds = max_nrounds, nfold = 3,
+                 early_stopping_rounds = 40, verbose = 0)
+    metric_col <- grep("^test_.*mean$", names(cv$evaluation_log), value = TRUE)[1]
+    nr <- which.min(cv$evaluation_log[[metric_col]])
+    cat("  shape q", a, " (", position, ") - nrounds: ", nr, "\n", sep = "")
+    xgb.train(params = params_a, data = dtrain, nrounds = nr, verbose = 0)
+  })
+
+  list(alphas = alphas, models = models, features = feature_cols)
+}
+
+# Function to turn the shape models into each player's RELATIVE lower and upper half-width
+#
+# Each half is returned as a FRACTION of the shape model's own median, never as raw points: the shape
+# models and the point model are trained on different populations, so their raw scales do not match and
+# mixing them puts the band in the wrong place. The level comes from `Predicted` alone.
+#
+# Mirrors predict_next_year's missing-feature handling so a column absent from the prediction frame is
+# filled with zeros rather than erroring. Row-wise sorting enforces q05 <= q50 <= q95.
+predict_shape <- function(shape_models, pred_df) {
+  feature_cols <- shape_models$features
+  missing_features <- setdiff(feature_cols, colnames(pred_df))
+  if (length(missing_features) > 0) {
+    pred_df[missing_features] <- 0
+  }
+  X <- data.matrix(pred_df[, feature_cols, drop = FALSE])
+
+  q <- vapply(shape_models$models, function(m) predict(m, newdata = X), numeric(nrow(X)))
+  q <- t(apply(q, 1, sort))
+
+  # A season total cannot be negative, but the regression will predict q05 < 0. Clamping keeps
+  # r_lo <= 1, hence Floor >= 0.
+  q <- pmax(q, 0)
+
+  # Guards against a tiny denominator: a player whose q50 rounds to nothing would otherwise post an
+  # enormous ceiling room and sweep the top of the board.
+  q50_safe <- pmax(q[, 2], 1)
+  list(r_lo = pmin((q[, 2] - q[, 1]) / q50_safe, 1),
+       r_hi = pmin((q[, 3] - q[, 2]) / q50_safe, 4))
+}
+
+# Function to simulate possible player outcomes and turn them into floor/ceiling prediction intervals
+#
+# A player's simulated outcome law is
+#   Predicted + epi_weight * epistemic deviation + his own asymmetrically-scaled outcome noise
+#
+# Each of n_bootstrap iterations resamples PLAYERS with replacement (a cluster bootstrap, so whole
+# careers move together) and refits at the point model's fixed tree count. The spread of those refit
+# predictions is the epistemic term; their out-of-bag residuals pool into the outcome SHAPE, which
+# shape_models then stretch per player via his own half-widths.
+#
+# The mixture is evaluated EXACTLY, not sampled: the shape is discretized onto an equal-weight quantile
+# grid and the reported percentiles come from the full n_bootstrap x n_grid cross-product. So a given
+# random_state always reproduces the same bands, while a different one is a genuinely different refit -
+# attr(result, "simulate_draws") emits draws for functionals the stored percentiles cannot answer.
+#
+# Parameters
+# ----------
+# n_bootstrap : integer
+#     Cluster-bootstrap refits. Drives BOTH the epistemic spread and the size of the OOB pool.
+# n_grid : integer
+#     Points used to discretize the outcome shape. Quantiles are exact to O(1/n_grid).
+# epi_weight : numeric
+#     Scales the epistemic refit spread. It is SYMMETRIC, so it dilutes the per-player asymmetry the
+#     shape models provide; 0 drops it entirely.
+# min_lo_frac : numeric
+#     Floors the lower half-width at this fraction of the upper one, so a player whose q05 sits at his
+#     q50 still gets a two-sided band.
+# random_state : numeric
+#     Seeds the bootstrap resampling only. The reported quantiles are deterministic given the refits.
+#
+# Returns
+# -------
+# data.frame keyed on player_id with pred_mean (exactly `Predicted`), the percentile set,
+# Floor/Ceiling, width/upside/downside, and the three level-neutral indices from add_upside_indices.
+generate_prediction_intervals <- function(model_object, shape_models, train_df, pred_df, position,
                                            n_bootstrap = 30,
-                                           n_noise_draws = 50,
                                            random_state = 62820,
-                                           n_resid_bins = 10) {
+                                           n_grid = 2000,
+                                           epi_weight = 1,
+                                           min_lo_frac = 0.15,
+                                           report_probs = c(0.05, 0.10, 0.20, 0.50, 0.80, 0.90, 0.95),
+                                           floor_from = "pred_p20",
+                                           ceiling_from = "pred_p80") {
   # Reuse the exact feature set, tuned hyperparameters, and CV-chosen tree count from the point model
   feature_cols <- model_object$features
   best_params <- model_object$best_params
@@ -376,14 +489,13 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
   X_pred <- data.matrix(pred_pos[, feature_cols, drop = FALSE])
   n_pred <- nrow(X_pred)
 
-  # The center of every player's band = the SAME full-data model prediction carried downstream as
-  # `Predicted`, so the intervals bracket the number on the draft sheet, not the bootstrap mean.
+  # Band centre = the same full-data prediction carried downstream as `Predicted`, so the intervals
+  # bracket the number on the draft sheet rather than the bootstrap mean
   point_pred <- predict(model_object$model, newdata = X_pred)
 
   # --- Pass 1: cluster-bootstrap refits at a FIXED tree count (no early stopping) ---
-  # base_all[b, ] holds each refit's eval-player predictions (the epistemic / model-uncertainty
-  # spread). Every iteration's out-of-bag (fitted, residual) pairs are collected into one GLOBAL
-  # pool, later binned by fitted value to draw level-appropriate (heteroscedastic) aleatoric noise.
+  # base_all[b, ] holds each refit's eval-player predictions (the epistemic spread); out-of-bag
+  # (fitted, residual) pairs accumulate into one global pool that becomes the outcome shape.
   base_all <- matrix(NA_real_, nrow = n_bootstrap, ncol = n_pred)
   pool_fitted <- vector("list", n_bootstrap)
   pool_resid  <- vector("list", n_bootstrap)
@@ -391,8 +503,8 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
   for (b in seq_len(n_bootstrap)) {
     set.seed(random_state + b)
 
-    # True player-level bootstrap: sample players with replacement, then replicate each drawn
-    # player's rows by its draw count (the fix vs. collapsing duplicate draws to a set)
+    # Sample players with replacement, replicating each drawn player's rows by his draw count so a
+    # duplicate draw actually counts twice
     boot_players <- sample(unique_players, size = length(unique_players), replace = TRUE)
     draw_counts <- table(boot_players)
     in_bag_idx <- unlist(
@@ -404,8 +516,8 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     # Out-of-bag players (never drawn) feed the global residual pool
     oob_idx <- which(group_ids %in% setdiff(unique_players, boot_players))
 
-    # Fit at the point model's fixed tree count - no watchlist / early stopping, so the OOB rows are
-    # never used for round selection and stay fully honest for the residual pool below.
+    # Fixed tree count, no early stopping, so the OOB rows are never used for round selection and stay
+    # honest for the residual pool
     dtrain <- xgb.DMatrix(data = X_tr[in_bag_idx, , drop = FALSE], label = y_tr[in_bag_idx])
     booster <- xgb.train(
       data = dtrain,
@@ -435,125 +547,247 @@ generate_prediction_intervals <- function(model_object, train_df, pred_df, posit
     }
   }
 
-  # --- Global, fitted-value-binned residual pool (heteroscedastic aleatoric noise) ---
-  # Bin the pooled OOB residuals by their fitted value so a player draws noise sized to his own
-  # projection level (a stud's error band != a backup's). Residuals are centered WITHIN each bin so
-  # the noise is mean-zero per level and does not shift the Predicted-centered distribution.
-  g_fitted <- unlist(pool_fitted, use.names = FALSE)
-  g_resid  <- unlist(pool_resid,  use.names = FALSE)
+  # --- One global outcome SHAPE, stretched per player by his own learned half-widths ---
+  # The pooled OOB residuals supply only the shape - three fitted quantiles cannot describe a whole
+  # distribution, and the empirical tails are the realistic part. shape_models supply the two
+  # half-widths, which is what gives each player his own asymmetry rather than his tier's.
+  g_resid <- unlist(pool_resid, use.names = FALSE)
+  global_centered <- g_resid - mean(g_resid)
 
-  bin_breaks <- unique(quantile(g_fitted, probs = seq(0, 1, length.out = n_resid_bins + 1), na.rm = TRUE))
-  n_bins_eff <- length(bin_breaks) - 1
-  g_bin <- findInterval(g_fitted, bin_breaks, rightmost.closed = TRUE, all.inside = TRUE)
+  # Rescale each half of the residual pool by its own spread, giving a unit shape whose lower half
+  # spans -1 and upper half +1. Re-multiplying by a player's d_lo / d_hi then reproduces his
+  # conditional q05 / q50 / q95 while keeping the real empirical tail form.
+  unit_shape <- function(r) {
+    r <- r - median(r)
+    lo <- median(r) - quantile(r, 0.05, names = FALSE)
+    hi <- quantile(r, 0.95, names = FALSE) - median(r)
+    if (!is.finite(lo) || lo <= 0) lo <- 1
+    if (!is.finite(hi) || hi <= 0) hi <- 1
+    ifelse(r < 0, r / lo, r / hi)
+  }
 
-  bin_residuals <- lapply(seq_len(n_bins_eff), function(k) {
-    r <- g_resid[g_bin == k]
-    if (length(r) == 0) numeric(0) else r - mean(r)
-  })
-  global_centered <- g_resid - mean(g_resid)   # fallback for any thin/empty bin
-  pred_bin <- findInterval(point_pred, bin_breaks, rightmost.closed = TRUE, all.inside = TRUE)
+  # Summarize the shape on an equal-weight grid at MIDPOINT probabilities (i - 0.5)/n_grid, so its
+  # quantile function matches the pool's to O(1/n_grid) with no sampling involved
+  grid_probs <- (seq_len(n_grid) - 0.5) / n_grid
+  to_grid <- function(r) {
+    if (length(r) == 0) return(NULL)
+    as.numeric(quantile(r, probs = grid_probs, names = FALSE, type = 7))
+  }
+  z_grid <- to_grid(unit_shape(global_centered))
 
-  # --- Pass 2: assemble the predictive sample per player ---
-  # final = Predicted + epistemic deviation (refit spread re-centered on Predicted) + binned noise.
-  # n_bootstrap refits x n_noise_draws noise draws = Monte Carlo samples per player.
+  # Relative half-widths scaled onto the player's own projection, which puts both halves on the same
+  # scale as the number they are measured against. A fringe player gets r_lo ~ 1 so his floor reaches
+  # zero; a stud gets r_lo ~ 0.76 so his lands near a quarter of his projection. Asymmetry is unchanged
+  # by the rescaling, since d_hi / d_lo = r_hi / r_lo.
+  shape <- predict_shape(shape_models, pred_pos)
+  d_hi <- pmax(shape$r_hi * point_pred, 1e-6)
+  d_lo <- pmax(shape$r_lo * point_pred, min_lo_frac * d_hi)
+
+  # --- Pass 2: exact quantiles of the predictive mixture, no sampling ---
+  # The mixture over the n_bootstrap epistemic shifts of the outcome grid IS the full cross-product
+  # (n_bootstrap x n_grid equal-weight points), so quantile() on it is exact - no draw noise, and two
+  # players with identical inputs get identical bands.
   ensemble_mean <- colMeans(base_all)
-  n_samples <- n_bootstrap * n_noise_draws
-  pred_mat <- matrix(NA_real_, nrow = n_samples, ncol = n_pred)
+  probs_out <- sort(unique(report_probs))
+  prob_names <- sprintf("pred_p%02d", round(probs_out * 100))
+  q_mat <- matrix(NA_real_, nrow = length(probs_out), ncol = n_pred,
+                  dimnames = list(prob_names, NULL))
 
-  set.seed(random_state)   # reproducible noise draws for a given RANDOM_STATE
-  min_bin <- 30            # if a bin is too thin, fall back to the global residual pool
+  # Per-player outcome grid: the shared shape stretched DOWN by d_lo and UP by d_hi, anchored on its
+  # MEDIAN. Resolved once here so the quantile pass and simulate_draws() cannot disagree.
+  #
+  # Median-anchoring is load-bearing: the MEAN of an asymmetrically-stretched grid depends on both
+  # half-widths, so subtracting it would let a large d_hi drag the floor down and re-couple the two
+  # edges. Anchoring on the median keeps q05 a function of d_lo alone and q95 of d_hi alone.
+  # Consequence: `Predicted` is the MEDIAN of the simulated law, so its mean sits above it when the
+  # player is right-skewed.
+  player_grid <- function(j) {
+    if (is.null(z_grid)) return(NULL)
+    g <- ifelse(z_grid < 0, z_grid * d_lo[j], z_grid * d_hi[j])
+    g - median(g)
+  }
+
   for (j in seq_len(n_pred)) {
-    epi_dev <- rep(base_all[, j] - ensemble_mean[j], each = n_noise_draws)
-    pool_j <- bin_residuals[[pred_bin[j]]]
-    if (length(pool_j) < min_bin) pool_j <- global_centered
-    noise_j <- if (length(pool_j) > 0) sample(pool_j, n_samples, replace = TRUE) else 0
-    pred_mat[, j] <- point_pred[j] + epi_dev + noise_j
-  }
-
-  # Aggregate across the Monte Carlo samples into per-player percentile intervals
-  col_quantile <- function(p) apply(pred_mat, 2, quantile, probs = p, na.rm = TRUE)
-
-  # Standardize a vector to mean 100 / sd 15 (IQ/wRC+-style); returns a flat 100 if it has no spread
-  index_100 <- function(x) {
-    s <- sd(x, na.rm = TRUE)
-    if (is.na(s) || s == 0) rep(100, length(x)) else 100 + 15 * (x - mean(x, na.rm = TRUE)) / s
-  }
-
-  # Level-adjust a signal into a studentized residual against the projection level, so BOTH its
-  # average AND its spread are equalized across levels. A mean-only detrend flattens the average but a
-  # higher-variance level still over-populates the tail (we saw ~0% of top-tier vs ~41% of another
-  # tier clearing the bar); dividing by the local spread fixes that, giving every projection level an
-  # equal shot at scoring high. The inner smooth() fits value-vs-level (loess, linear fallback for
-  # tiny pools); center = residual, scale = smooth of |residual| (~ conditional sd), floored to avoid
-  # blowups. Vectors (not data-mask columns) are passed in so loess behaves inside mutate.
-  level_adjust <- function(x, level) {
-    smooth <- function(y) {
-      df <- data.frame(y = y, level = level)
-      fit <- tryCatch(
-        if (sum(is.finite(y) & is.finite(level)) >= 10) {
-          loess(y ~ level, data = df, span = 0.75, na.action = na.exclude)
-        } else {
-          lm(y ~ level, data = df, na.action = na.exclude)
-        },
-        error = function(e) lm(y ~ level, data = df, na.action = na.exclude)
-      )
-      predict(fit, newdata = df)
+    # The refit spread is symmetric, so it dilutes the shape models' asymmetry - epi_weight scales it
+    epi_dev <- epi_weight * (base_all[, j] - ensemble_mean[j])
+    grid_j <- player_grid(j)
+    vals <- if (is.null(grid_j)) {
+      point_pred[j] + epi_dev
+    } else {
+      point_pred[j] + as.numeric(outer(epi_dev, grid_j, "+"))
     }
-    resid <- x - smooth(x)                    # center: above/below typical for the level
-    local_scale <- smooth(abs(resid))         # scale: typical |residual| at the level (~ conditional sd)
-    # Floor the denominator at HALF the typical |residual|. The |residual| smooth collapses toward
-    # zero at the sparse top of the projection range (few neighbours up there), which turns an
-    # ordinary residual into an enormous studentized value: the #1 RB once scored a ceiling_index
-    # of -12 off a residual of -0.02 against a median |residual| of 0.03, and that lone outlier
-    # then inflated the position's sd and compressed everyone else toward 100. A 5% floor bounded
-    # nothing useful - it allowed a denominator 20x tighter than typical.
-    floor_scale <- 0.50 * median(abs(resid), na.rm = TRUE)
-    if (!is.finite(floor_scale) || floor_scale <= 0) floor_scale <- 1
-    local_scale <- ifelse(is.finite(local_scale) & local_scale > floor_scale, local_scale, floor_scale)
-    resid / local_scale
+    # The epistemic term can still push draws under zero even with the shape ratios clamped
+    q_mat[, j] <- quantile(pmax(vals, 0), probs = probs_out, names = FALSE, type = 7)
   }
 
-  data.frame(
+  # Draws from the same law the quantiles above describe, for functionals the stored percentiles cannot
+  # answer - P(top-12 finish), P(bust below X). Not used by reporting.
+  simulate_draws <- function(j, n_draws = 10000, seed = random_state) {
+    set.seed(seed + j)
+    epi_dev <- epi_weight * (base_all[, j] - ensemble_mean[j])
+    grid_j <- player_grid(j)
+    noise <- if (is.null(grid_j)) 0 else sample(grid_j, n_draws, replace = TRUE)
+    pmax(point_pred[j] + sample(epi_dev, n_draws, replace = TRUE) + noise, 0)
+  }
+
+  bands <- data.frame(
     player_id = pred_pos$player_id,
     Player = pred_pos$Player,
     Pos = pred_pos$Pos,
-    pred_mean = colMeans(pred_mat, na.rm = TRUE),
-    pred_p05 = col_quantile(0.05),
-    pred_p10 = col_quantile(0.10),
-    pred_p50 = col_quantile(0.50),
-    pred_p90 = col_quantile(0.90),
-    pred_p95 = col_quantile(0.95),
+    # The band is median-anchored on this, so pred_mean is exactly `Predicted` and also the simulated
+    # law's median. Named pred_mean for the downstream contract, not because it is the law's mean.
+    pred_mean = point_pred,
     stringsAsFactors = FALSE
-  ) %>%
-    mutate(
-      Floor = pred_p05,                  # Floor and Ceiling default to the 90% interval
-      Ceiling = pred_p95,
-      pred_width = pred_p95 - pred_p05,
-      pred_upside = pred_p95 - pred_mean,    # ceiling distance above the mean (reported as-is)
-      pred_downside = pred_mean - pred_p05,  # floor distance below the mean (reported as-is)
+  )
+  bands <- cbind(bands, as.data.frame(t(q_mat)))   # one column per reported percentile
 
-      # Scale-free band edges relative to the projection (the "predicted value level" normalization).
-      # Intermediates only: each is detrended vs level and standardized into an index below, then dropped.
+  attr(bands, "simulate_draws") <- simulate_draws
+  add_upside_indices(bands, floor_from = floor_from, ceiling_from = ceiling_from)
+}
+
+# Standardize a vector to mean 100 / sd 15 (IQ/wRC+-style); flat 100 if it has no spread.
+# These three helpers are top-level, not nested, so the diagnostics in tests/ can reach them -
+# import_from_script there keeps only top-level `name <- function(...)` expressions.
+index_100 <- function(x) {
+  s <- sd(x, na.rm = TRUE)
+  if (is.na(s) || s == 0) rep(100, length(x)) else 100 + 15 * (x - mean(x, na.rm = TRUE)) / s
+}
+
+# Level-adjust a signal into a studentized residual against the projection level, equalizing BOTH its
+# average and its spread by level so no projection tier is favored in the centre or the tail. A
+# mean-only detrend leaves the higher-variance tier over-populating the top. smooth() fits
+# value-vs-level (loess, linear fallback for tiny pools); centre = residual, scale = smooth of
+# |residual|. Vectors, not data-mask columns, so loess behaves inside mutate.
+level_adjust <- function(x, level) {
+  smooth <- function(y) {
+    df <- data.frame(y = y, level = level)
+    fit <- tryCatch(
+      if (sum(is.finite(y) & is.finite(level)) >= 10) {
+        loess(y ~ level, data = df, span = 0.75, na.action = na.exclude)
+      } else {
+        lm(y ~ level, data = df, na.action = na.exclude)
+      },
+      error = function(e) lm(y ~ level, data = df, na.action = na.exclude)
+    )
+    predict(fit, newdata = df)
+  }
+  resid <- x - smooth(x)                    # center: above/below typical for the level
+  local_scale <- smooth(abs(resid))         # scale: typical |residual| at the level (~ conditional sd)
+  # Floor the denominator at HALF the typical |residual|. The |residual| smooth collapses toward zero
+  # at the sparse top of the projection range, where an ordinary residual would otherwise studentize
+  # into an enormous value and inflate the position's sd. Load-bearing - do not loosen.
+  floor_scale <- 0.50 * median(abs(resid), na.rm = TRUE)
+  if (!is.finite(floor_scale) || floor_scale <= 0) floor_scale <- 1
+  local_scale <- ifelse(is.finite(local_scale) & local_scale > floor_scale, local_scale, floor_scale)
+  resid / local_scale
+}
+
+# Standardize the upside composite around the NEUTRAL point (100) rather than the sample mean.
+#
+# index_100 would put 100 at the mean of whatever it is given, and an OR-style combination has a mean
+# well above 100 when its inputs are centred there - so a player above 100 on both axes could still land
+# below 100 overall, which contradicts what the score is supposed to mean. Anchoring on 100 makes the
+# input and output thresholds agree: both axes above 100 always scores above 100, and vice versa.
+#
+# Consequence: 100 means "exactly neutral on both axes", NOT "typical player". The median player scores
+# above 100, because most players are above neutral on at least one axis.
+index_at_neutral <- function(x, neutral = 100) {
+  s <- sd(x, na.rm = TRUE)
+  if (is.na(s) || s == 0) return(rep(neutral, length(x)))
+  neutral + 15 * (x - neutral) / s
+}
+
+# Put an index on a tail-equalized scale, holding `neutral` fixed: rank -> normal score.
+#
+# ceiling_index and floor_index are both mean 100 / sd 15, but NOT the same SHAPE - ceiling_index is
+# strongly left-skewed (-1.8 QB / -2.2 RB / -6.1 WR) while floor_index is right-skewed (+0.9 / +1.8 /
+# +0.4). floor_index therefore owns the long UPPER tail, so adding raw deviations silently weights
+# floor far heavier than ceiling (a raw sum comes out .77 correlated with floor_index and only .25
+# with ceiling_index at WR). Mapping each axis through its own ECDF makes a +2sd ceiling exactly as
+# rare as a +2sd floor, so the sum in add_upside_indices weighs them evenly.
+#
+# The qnorm(p0) subtraction is load-bearing. A plain rank-normal score puts its neutral point at the
+# axis's MEDIAN, which is not 100 on a skewed axis (only ~30% of WR ceiling_index values sit below
+# 100) - which breaks the "above 100 on both axes always scores above 100" guarantee for a handful of
+# players. Anchoring on where 100 actually falls keeps the published axis columns and the composite
+# agreeing about what neutral means.
+rank_normal_at <- function(x, neutral = 100) {
+  n <- sum(!is.na(x))
+  if (n < 3) return(x)
+  p  <- (rank(x, na.last = "keep") - 0.5) / n
+  p0 <- mean(x < neutral, na.rm = TRUE)          # where `neutral` sits on this axis
+  p0 <- min(max(p0, 1e-4), 1 - 1e-4)             # guard qnorm against an all-above / all-below axis
+  neutral + 15 * (qnorm(p) - qnorm(p0))
+}
+
+# Function to attach the three level-normalized upside signals to a table of band edges
+#
+# Takes only pred_mean / pred_p05 / pred_p95, so it is indifferent to how the edges were produced.
+#
+# Parameters
+# ----------
+# bands_df : data.frame
+#     Must carry pred_mean and the two percentile columns named below. Indices are standardized WITHIN
+#     the frame passed in, so this must be called PER MODEL GROUP (QB / RB / WR+TE) exactly as
+#     generate_prediction_intervals does - pooling positions would change every published index.
+# floor_from, ceiling_from : character
+#     Which percentile columns become Floor and Ceiling. p20/p80 by default rather than p05/p95: at the
+#     5th percentile most players' floors pin near zero, which compresses floor_share and costs
+#     floor_index its ability to separate them. Extreme quantiles are also the least precisely
+#     estimated. Set to "pred_p05"/"pred_p95" for the wider reading.
+#
+# Returns
+# -------
+# bands_df plus Floor, Ceiling, pred_width, pred_upside, pred_downside, and the three indices.
+add_upside_indices <- function(bands_df, floor_from = "pred_p20", ceiling_from = "pred_p80") {
+  bands_df %>%
+    mutate(
+      Floor = .data[[floor_from]],
+      Ceiling = .data[[ceiling_from]],
+      pred_width = Ceiling - Floor,
+      pred_upside = Ceiling - pred_mean,    # ceiling distance above the projection
+      pred_downside = pred_mean - Floor,    # floor distance below the projection
+
+      # Scale-free band edges relative to the projection. Intermediates only - each is detrended vs
+      # level and standardized into an index below, then dropped.
+      #   ceiling_room: how far ABOVE the projection the ceiling sits
+      #   floor_share:  how CLOSE to the projection the floor sits
       ceiling_room = if_else(pred_mean > 0, Ceiling / pred_mean, NA_real_),
       floor_share  = if_else(pred_mean > 0, Floor   / pred_mean, NA_real_),
 
-      # Two direct, level-NEUTRAL signals: level_adjust() studentizes each band-edge ratio against the
-      # projection level (equalizing BOTH its average and its spread, so no projection tier is favored
-      # in the center or the tail), then index_100 standardizes WITHIN position to mean 100 / sd 15.
-      # Each answers one thing:
-      #   ceiling_index: who has an unusually high CEILING for their projection level
-      #   floor_index:   who has an unusually high / safe FLOOR for their projection level
+      # level_adjust makes each ratio level-NEUTRAL, then index_100 standardizes within position to
+      # mean 100 / sd 15, so each answers "unusually high for a player projected this much?"
       ceiling_index = index_100(level_adjust(ceiling_room, pred_mean)),
       floor_index   = index_100(level_adjust(floor_share,  pred_mean)),
 
-      # Single sortable upside score = positive-deviation magnitude of the two indices. This is an OR,
-      # not an AND: a player is rewarded for spiking on EITHER axis, earns extra for both, and is never
-      # penalized for an ordinary axis (a below-100 index contributes 0). Re-standardized to 100/15 so
-      # 100 = typical for the position and higher = a stronger ceiling-or-floor outlier. With the
-      # components now level-neutral, this no longer tracks the projection.
-      upside_index = index_100(sqrt(pmax(ceiling_index - 100, 0)^2 + pmax(floor_index - 100, 0)^2))
+      # Single sortable score: a DEFICIT-WEIGHTED SUM of the two axes, on the tail-equalized scale.
+      # Surpluses above 100 count in full, so a genuine spike on either axis still flags the player;
+      # deficits count at UPSIDE_DEFICIT_WEIGHT, so a weak axis costs something without cancelling a
+      # spike; and the weaker axis earns UPSIDE_BOTH_BONUS extra once it too clears 100.
+      #
+      # This replaced a pmax() over the two axes, which ignored the weaker one entirely unless it beat
+      # 100 - Josh Allen scored 104 on a ceiling_index of 20. A plain sum (ceiling + floor - 200) over-
+      # corrects in the other direction: the axes anti-correlate in the tails, so it cancelled exactly
+      # the players it should flag (Tyreek Hill 149/61 fell from 170 to 107, Malik Nabers 136/47 to 87)
+      # and degenerated into a floor sort. Damping the deficit keeps both specialist types on the board.
+      #
+      # Monotone increasing in BOTH axes (slope 1 above neutral, UPSIDE_DEFICIT_WEIGHT below), so a
+      # player cannot be beaten by someone worse on both, and above 100 on both always scores above 100.
+      #
+      # Anchored at 100 rather than standardized to the mean - see index_at_neutral. The composite is
+      # deliberately NOT level-adjusted: level_adjust is a relative transform, so it can reorder players
+      # at different projections and would break the guarantee above. That costs some level neutrality,
+      # which is the accepted trade for a score that means what it says.
+      ceiling_n = rank_normal_at(ceiling_index),
+      floor_n   = rank_normal_at(floor_index),
+      upside_index = index_at_neutral(
+        100 +
+          pmax(ceiling_n - 100, 0) + pmax(floor_n - 100, 0) +
+          UPSIDE_DEFICIT_WEIGHT * (pmin(ceiling_n - 100, 0) + pmin(floor_n - 100, 0)) +
+          UPSIDE_BOTH_BONUS * pmax(pmin(ceiling_n, floor_n) - 100, 0)
+      )
     ) %>%
-    select(-ceiling_room, -floor_share)
+    select(-ceiling_room, -floor_share, -ceiling_n, -floor_n)
 }
 
 # Function to display the anticipated "career trajectory" of players, combining historical results with forecasted performance
@@ -1039,9 +1273,15 @@ combined <-
   mutate(pos_rank_last_year = lag(pos_rank, 1), # prior year rank
          career_top_finish_count = cumsum(top_finish_flag)) %>%
   ungroup() %>%
-  # Only apply infinity and NA fixes to numeric columns
-  mutate(across(where(is.numeric), ~ ifelse(is.infinite(.), NA, .))) %>%
-  mutate(across(where(is.numeric), ~ replace_na(., 0)))
+  # Infinity/NA fixes apply to FEATURE columns only. points_next_year is the target and must stay NA
+  # wherever the next season does not exist - the PRED_YEAR rows, and anyone who never played again -
+  # or every downstream !is.na(points_next_year) filter becomes a no-op.
+  mutate(across(where(is.numeric) & !any_of("points_next_year"), ~ ifelse(is.infinite(.), NA, .))) %>%
+  mutate(across(where(is.numeric) & !any_of("points_next_year"), ~ replace_na(., 0)))
+
+# Caching the engineered feature table so the diagnostics in tests/ can rebuild this exact modeling
+# frame without re-running the data build
+fwrite(combined, paste0("data/combined_features_", as.character(EVAL_YEAR), ".csv"))
 
 # Filtering for players with extremely few points in the next year, these players would not be drafted regardless
 # Removing the EVAL_YEAR data from the training set, as it is the evaluation year
@@ -1055,11 +1295,20 @@ model_df <-
   ) %>%
   filter(Year < as.Date(paste0(EVAL_YEAR, "-01-01")))
 
-# Creating the prediction dataframes for the evaluation year
+# The UNTRUNCATED training frame, used only by train_shape_models. model_df's points threshold filters
+# on the OUTCOME, so it deletes the bust seasons a floor exists to represent. Same leakage cutoff as
+# model_df; missing-next-season rows stay in and become a realized zero inside train_shape_models.
+combined_train <-
+  combined %>%
+  filter(G > 0) %>%
+  filter(Year < as.Date(paste0(EVAL_YEAR, "-01-01")))
+
+# Creating the prediction dataframes for the evaluation year.
+# NOTE: deliberately no points_next_year filter - by construction these rows have no next season yet,
+# so the target is NA for all of them.
 pred_df <-
   combined %>%
-  filter(!is.na(points_next_year), G > 0) %>%
-  filter(Year == as.Date(paste0(EVAL_YEAR, "-01-01")))
+  filter(Year == as.Date(paste0(EVAL_YEAR, "-01-01")), G > 0)
 
 # Splitting the prediction dataframe into positional groupings
 qb_pred_df <- pred_df %>% filter(Pos == "QB")
@@ -1223,11 +1472,17 @@ qb_preds <- predict_next_year(qb_model, qb_pred_df)
 rb_preds <- predict_next_year(rb_model, rb_pred_df)
 wr_preds <- predict_next_year(wr_model, wr_pred_df)
 
-# Generating bootstrap floor/ceiling intervals per position (reuses each model's tuned params)
+# Learning each player's outcome SHAPE - how far his season plausibly reaches down versus up based on historic similarity.
+# NOTE: trained on combined_train (untruncated), not model_df, whose points threshold deletes the busts.
+qb_shape <- train_shape_models(qb_model, combined_train, "QB", random_state = RANDOM_STATE)
+rb_shape <- train_shape_models(rb_model, combined_train, "RB", random_state = RANDOM_STATE)
+wr_shape <- train_shape_models(wr_model, combined_train, "WR", random_state = RANDOM_STATE)
+
+# Generating the simulated floor/ceiling intervals per position (reuses each model's tuned params)
 # NOTE: this fits n_bootstrap XGBoost models per position, lower n_bootstrap for a fast test run
-qb_intervals <- generate_prediction_intervals(qb_model, model_df, qb_pred_df, "QB", random_state = RANDOM_STATE)
-rb_intervals <- generate_prediction_intervals(rb_model, model_df, rb_pred_df, "RB", random_state = RANDOM_STATE)
-wr_intervals <- generate_prediction_intervals(wr_model, model_df, wr_pred_df, "WR", random_state = RANDOM_STATE)
+qb_intervals <- generate_prediction_intervals(qb_model, qb_shape, model_df, qb_pred_df, "QB", random_state = RANDOM_STATE)
+rb_intervals <- generate_prediction_intervals(rb_model, rb_shape, model_df, rb_pred_df, "RB", random_state = RANDOM_STATE)
+wr_intervals <- generate_prediction_intervals(wr_model, wr_shape, model_df, wr_pred_df, "WR", random_state = RANDOM_STATE)
 intervals_all <- bind_rows(qb_intervals, rb_intervals, wr_intervals)
 
 # Visualizing projected rank movement vs last season, 20 players per tier by predicted rank
@@ -1254,7 +1509,7 @@ final <-
   left_join(
     intervals_all %>%
       select(player_id, Floor, Ceiling, pred_mean,
-             pred_p05, pred_p10, pred_p50, pred_p90, pred_p95, pred_width,
+             pred_p05, pred_p10, pred_p20, pred_p50, pred_p80, pred_p90, pred_p95, pred_width,
              pred_downside, pred_upside, ceiling_index, floor_index, upside_index),
     by = "player_id"
   )

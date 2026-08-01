@@ -23,7 +23,7 @@ EVAL_YEAR <- 2025                   # Final year in training dataframe
 PRED_YEAR <- EVAL_YEAR + 1          # Year to predict
 START_YEAR <- 2006                 # Earliest season to pull data. NOTE: Minimum year of 2006 to align with ESPN QBR coverage
 # Scoring type for fantasy points calculation, one of the keys in SCORING_MULTS below
-SCORING_TYPE <- "HALF"
+SCORING_TYPE <- "PPR"
 
 # Per-reception multiplier keyed by scoring type, the single source of truth for PPR weighting
 SCORING_MULTS <- c(STANDARD = 0, HALF = 0.5, PPR = 1.0)

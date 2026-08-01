@@ -18,7 +18,7 @@ SKILL_PENALTY_FACTOR <- 0.9  # Penalty if only expert projection is available (r
 
 ## Set TRUE to skip the FantasyPros scrape and read the manual CSV exports instead, mirroring
 ## SKIP_DATA_LOAD in 01_build_nfl_model.R. Useful when offline or when the Chrome login has lapsed.
-SKIP_FP_SCRAPE <- FALSE
+SKIP_FP_SCRAPE <- TRUE
 
 
 # Function for cleaning up player name columns for joining projection data together
@@ -150,6 +150,7 @@ combined_projections <-
   # Floor/Ceiling/upside_index/ceiling_index/floor_index are carried through untouched - they stay the
   # model's own expectation (not manually adjusted, not blended), shown beside the blended Final_Projection
   select(player_id, Player = Player.x, Pos, Predicted, FantasyPros_Player = Player.y, Projected_Points,
+         pred_downside, pred_upside,
          Floor, Ceiling, upside_index, ceiling_index, floor_index) %>%
   mutate(PosGroup = if_else(Pos == "QB", "QB", "SKILL")) # Grouping QBs separately from skill positions for blending
 
@@ -194,6 +195,7 @@ final_df <-
          Model_Prediction = Predicted,
          FantasyPros_Prediction = Projected_Points,
          Final_Projection = final_projection,
+         pred_downside, pred_upside,
          Floor, Ceiling, ceiling_index, floor_index, upside_index) %>%  # model's own range, carried through untouched
   arrange(Pos, desc(Final_Projection)) %>%
   filter(!is.na(FantasyPros_Prediction)) # Removing players without a FantasyPros Projection, these players are out of the league or retired

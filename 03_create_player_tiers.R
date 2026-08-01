@@ -10,16 +10,16 @@ source("00_globals.R")
 ## SELECT EITHER UNDERDOG FANTASY OR ESPN ROSTER CUTOFF SUGGESTIONS
 ## Player pool size should be roughly 115% of total league roster spots available
 # Underdog Fantasy Player Cutoffs
-QB_CUTOFF <- 30
-RB_CUTOFF <- 82
-WR_CUTOFF <- 104
-TE_CUTOFF <- 28
+# QB_CUTOFF <- 30
+# RB_CUTOFF <- 82
+# WR_CUTOFF <- 104
+# TE_CUTOFF <- 28
 
 # Draftkings Fantasy Player Cutoffs
-# QB_CUTOFF <- 32
-# RB_CUTOFF <- 90
-# WR_CUTOFF <- 118
-# TE_CUTOFF <- 36
+QB_CUTOFF <- 32
+RB_CUTOFF <- 90
+WR_CUTOFF <- 118
+TE_CUTOFF <- 36
 
 # # ESPN Draft Cutoffs
 # QB_CUTOFF <- 24
@@ -41,16 +41,16 @@ VORP_CUTOFF <- 0.66
 # Generally, WRs are going to be the most valuable position by ADP
 # rankings should roughly reflect expected positional scarcity when drafting
 # Underdog
-QB_DAMP <- 0.6
-RB_DAMP <- 1.05
-TE_DAMP <- 0.85
-WR_DAMP <- 1.2
+# QB_DAMP <- 0.6
+# RB_DAMP <- 1.05
+# TE_DAMP <- 0.85
+# WR_DAMP <- 1.2
 
 # Draftkings
-# QB_DAMP <- 0.65
-# RB_DAMP <- 1.15
-# TE_DAMP <- 0.80
-# WR_DAMP <- 1.15
+QB_DAMP <- 0.65
+RB_DAMP <- 1.15
+TE_DAMP <- 0.80
+WR_DAMP <- 1.15
 
 # Function for estimating optimal K value
 plot_wss_elbow <- function(player_df, pos = NULL, max_k = 25) {
@@ -218,18 +218,7 @@ plot_positional_tiers <- function(player_df, pos = "RB", interactive = FALSE) {
 # Scatter of each player's model positional rank (x, by the blended Final_Projection) against their
 # FantasyPros expert positional rank (y, by the raw expert projection), colored by tier. Ranks
 # (1 = best) are used instead of raw projections so the enormous expert point totals no longer
-# stretch the plot. Both axes are reversed so the best players sit in
-# the TOP-RIGHT. A dashed line marks agreement: points toward the top-left are ranked better by the
-# experts than the model (expert favored), points toward the bottom-right are the model's relative
-# values / sleepers (model favored). The n_label players with the largest rank disagreement (spots
-# apart between the two rankings) are named so the sharpest outliers stand out.
-# Pass a position to focus on one group (colors then use the positional tier); leave pos = NULL for
-# the whole board (colors use the overall tier). interactive = TRUE mirrors plot_positional_tiers:
-# hover surfaces each player's name/ranks with a tier-colored ring and tooltip text on a white card.
-# Supply replacement_points (the Pos / Replacement_Value frame built earlier in this script) to gate
-# the outlier LABELS to players at or above their position's replacement level.
-# final_pred toggles the "model" axis: TRUE (default) ranks by the blended Final_Projection,
-# FALSE ranks by the underlying Model_Prediction (the pure model, pre-blend, sharper contrast).
+# stretch the plot. 
 plot_model_vs_expert <- function(player_df, pos = NULL, interactive = FALSE, n_label = 10,
                                  replacement_points = NULL, final_pred = TRUE,
                                  width_svg = 12, height_svg = 8) {
@@ -434,7 +423,7 @@ total_attrs <-
   select(Relative_Value)
 
 #### Obtaining clusters with optimal K value
-kmeans_attrs <- kmeans(total_attrs, centers = 10, nstart = 50)
+kmeans_attrs <- kmeans(total_attrs, centers = 12, nstart = 50)
 
 total_df$Tier <- kmeans_attrs$cluster
 
@@ -444,6 +433,7 @@ total_df$Tier <- kmeans_attrs$cluster
 tier_df <-
   total_df %>%
   select(player_id, Player, Pos, Model_Prediction, FantasyPros_Prediction, Final_Projection,
+         pred_downside, pred_upside,
          Floor, Ceiling, upside_index, ceiling_index, floor_index,   # model's own range/upside, carried to the final sheet
          FP_Pos_Ranking, Pos_Ranking, Overall_Ranking, Relative_Value, Tier) %>%
   group_by(Tier) %>%
@@ -464,7 +454,7 @@ qb_df <- assign_positional_tiers(tier_df, pos = "QB", k = 7)
 ## Runningbacks
 plot_wss_elbow(tier_df, pos = "RB", max_k = 15)
 
-rb_df <- assign_positional_tiers(tier_df, pos = "RB", k = 8)
+rb_df <- assign_positional_tiers(tier_df, pos = "RB", k = 7)
 
 ## Wide Receivers
 plot_wss_elbow(tier_df, pos = "WR", max_k = 15)
@@ -474,7 +464,7 @@ wr_df <- assign_positional_tiers(tier_df, pos = "WR", k = 7)
 ## Tight Ends
 plot_wss_elbow(tier_df, pos = "TE", max_k = 15)
 
-te_df <- assign_positional_tiers(tier_df, pos = "TE", k = 6)
+te_df <- assign_positional_tiers(tier_df, pos = "TE", k = 7)
 
 # Combine all positional tiers into a single dataframe
 final_df <- bind_rows(list(qb_df, rb_df, wr_df, te_df)) %>%
